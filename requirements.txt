@@ -1,0 +1,4 @@
+tensorstore
+zapbench @ git+https://github.com/google-research/zapbench.git#egg=zapbench
+
+numpy
