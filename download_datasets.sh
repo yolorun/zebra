@@ -31,7 +31,7 @@ DATASETS=(
 #    "df_over_f_xyz_chunked"
 #    "flow_fields"
 #    "mask"
-    "position_embedding"
+#    "position_embedding"
 #!    "raw"
 #    "segmentation"
 #    "segmentation_xy"

@@ -8,7 +8,8 @@
 7. dataset check: https://zapbench-release.storage.googleapis.com/volumes/README.html
 8. show data_use.md, download_datasets.sh and the gemini convo that generated them
 9. play around with data
-10. design model
-11. train model
-12. eval model
-13. run brain thing
+10. szunike
+11. design model
+12. train model
+13. eval model
+14. run brain thing
