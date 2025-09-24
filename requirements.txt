@@ -2,3 +2,25 @@ tensorstore
 zapbench @ git+https://github.com/google-research/zapbench.git#egg=zapbench
 
 numpy
+pandas
+matplotlib
+seaborn
+pandas
+h5py
+opencv-python
+wandb
+scikit-learn
+scipy
+einops
+scikit-image
+tqdm
+
+torch
+torchvision
+torchio
+lightning
+safetensors
+
+transformers
+accelerate
+vector-quantize-pytorch
