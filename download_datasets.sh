@@ -3,7 +3,7 @@
 # This script downloads all the ZapBench datasets from Google Cloud Storage.
 
 # The destination directory for the datasets.
-DEST_DIR="/home/v/v/zebra/data"
+DEST_DIR="/home/v/proj/zebra/data"
 
 # The base URL for the datasets.
 BASE_URL="gs://zapbench-release/volumes/20240930"
@@ -33,12 +33,12 @@ DATASETS=(
 #    "mask"
 #    "position_embedding"
 #!    "raw"
-#    "segmentation"
-#    "segmentation_xy"
-#    "segmentation_xy_multiscale"
-    "stimuli_features"
-    "stimuli_raw"
-    "stimulus_evoked_response"
+   "segmentation"
+   "segmentation_xy"
+   "segmentation_xy_multiscale"
+    # "stimuli_features"
+    # "stimuli_raw"
+    # "stimulus_evoked_response"
 #    "traces_fluroglancer"
 #    "traces_rastermap_sorted"
 )

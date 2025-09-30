@@ -13,9 +13,9 @@ from zapbench import constants, data_utils
 # --- Configuration ---
 cfg = {
     # Data parameters
-    'traces_path': 'file:///home/v/v/zebra/data/traces_zip/traces',
-    'embedding_path': 'file:///home/v/v/zebra/data/position_embedding',
-    'stimulus_path': '/home/v/v/zebra/data/stimuli_raw/stimuli_and_ephys.10chFlt',
+    'traces_path': 'file:///home/v/proj/zebra/data/traces',
+    'embedding_path': 'file:///home/v/proj/zebra/data/position_embedding',
+    'stimulus_path': '/home/v/proj/zebra/data/stimuli_raw/stimuli_and_ephys.10chFlt',
     'condition_name': 'turning',  # Condition to train on
     'sequence_length': 150,
     'prediction_horizon': 1,

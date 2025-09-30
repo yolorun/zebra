@@ -1,5 +1,5 @@
 tensorstore
-zapbench @ git+https://github.com/google-research/zapbench.git#egg=zapbench
+# zapbench @ git+https://github.com/google-research/zapbench.git#egg=zapbench
 
 numpy
 pandas
@@ -24,3 +24,5 @@ safetensors
 transformers
 accelerate
 vector-quantize-pytorch
+networkx
+cupy-cuda11x
