@@ -23,15 +23,15 @@ cfg = {
     'traces_path': 'file:///home/v/proj/zebra/data/traces',
     'max_neurons': None,  # Limit neurons for faster processing, set to None for all
     'max_lag': 1,  # Maximum time lag in steps to consider for correlation
-    'n_shuffles': 100,  # Number of shuffles for significance testing
-    'p_value_threshold': 0.005, # Significance level
+    'n_shuffles': 0,  # Number of shuffles for significance testing
+    'p_value_threshold': 0.001, # Significance level
     'output_file': 'combined_connectivity_graph.pkl',
     'plot_dir': 'connectivity_plots',
     'use_gpu': True, # Set to False to use the CPU implementation
     'gpu_chunk_size': 2048, # Number of pairs to process in a batch on GPU to manage memory
 
     # --- Windowed Analysis Configuration ---
-    'use_windowed_analysis': True,    # Enable to use windowed analysis for more robust connections
+    'use_windowed_analysis': False,    # Enable to use windowed analysis for more robust connections
     'window_size_fraction': 0.2,      # e.g., 20% of the trace length
     'window_step_fraction': 0.1,      # e.g., 10% of the trace length
     'min_significant_windows': 5      # How many windows a pair must be significant in to count
@@ -75,8 +75,8 @@ def batch_cross_correlate_fft(signal, batch_signals, mode='full'):
     batch_fft = cp.fft.fft(batch_padded, axis=1)
     
     # Cross-correlation in frequency domain: conj(fft(a)) * fft(b)
-    # Since we want correlate(batch[i], signal), we use conj(batch_fft) * signal_fft
-    corr_fft = cp.conj(batch_fft) * signal_fft[cp.newaxis, :]
+    # To compute correlate(signal, batch[i]), we use conj(signal_fft) * batch_fft
+    corr_fft = cp.conj(signal_fft[cp.newaxis, :]) * batch_fft
     
     # Inverse FFT to get correlation
     corr_full = cp.fft.ifft(corr_fft, axis=1).real
@@ -118,7 +118,10 @@ def batch_compute_significance_thresholds(signal, batch_signals, n_shuffles, p_v
         max_corr_shuffled[:, shuffle_idx] = cp.max(cp.abs(corr_window), axis=1)
     
     # Compute significance thresholds
-    significance_thresholds = cp.percentile(max_corr_shuffled, (1 - p_value_threshold) * 100, axis=1)
+    if n_shuffles > 0:
+        significance_thresholds = cp.percentile(max_corr_shuffled, (1 - p_value_threshold) * 100, axis=1)
+    else:
+        significance_thresholds = cp.zeros(n_signals) + 94.
     
     return significance_thresholds
 
@@ -207,10 +210,11 @@ def gpu_process_wrapper_optimized(gpu_id, neuron_indices, data, max_lag, n_shuff
 
                 for idx, lag in enumerate(peak_lags):
                     j = significant_global_js[idx].item()
+                    # With correlate(i, j), a positive lag means i -> j
                     if lag > 0:
-                        all_connections_for_i.append((j, i))
-                    else:
                         all_connections_for_i.append((i, j))
+                    else:
+                        all_connections_for_i.append((j, i))
             
             mempool.free_all_blocks()
 
@@ -445,74 +449,6 @@ def calculate_connectivity_gpu(data, max_lag, n_shuffles, p_value_threshold, chu
 
     return connectivity
 
-def gpu_process_wrapper(gpu_id, neuron_indices, data, max_lag, n_shuffles, p_value_threshold, chunk_size, results_queue):
-    """A fully vectorized wrapper that processes in chunks to manage memory."""
-    cp.cuda.Device(gpu_id).use()
-    data_gpu = cp.asarray(data)
-    num_timesteps, num_neurons = data_gpu.shape
-    mempool = cp.get_default_memory_pool()
-
-    for i in tqdm(neuron_indices, desc=f"GPU {gpu_id}", position=gpu_id):
-        if i >= num_neurons - 1:
-            continue
-
-        neuron_i_activity = data_gpu[:, i]
-        all_connections_for_i = []
-        all_target_indices = np.arange(i + 1, num_neurons)
-
-        for k in range(0, len(all_target_indices), chunk_size):
-            chunk_indices_np = all_target_indices[k:k + chunk_size]
-            if chunk_indices_np.size == 0:
-                continue
-            
-            chunk_indices = cp.asarray(chunk_indices_np)
-            targets_j = data_gpu[:, chunk_indices].T
-            n_targets = targets_j.shape[0]
-
-            # # --- 1. Vectorized Significance Testing ---
-            # expanded_targets = cp.repeat(targets_j[:, cp.newaxis, :], n_shuffles, axis=1)
-            # shuffled_indices = cp.random.rand(*expanded_targets.shape).argsort(axis=2)
-            # permutations = cp.take_along_axis(expanded_targets, shuffled_indices, axis=2)
-            # permutations = permutations.reshape(n_targets * n_shuffles, num_timesteps)
-            # # Loop since cp_correlate doesn't support batching
-            # shuffled_corr = cp.stack([cp_correlate(p, neuron_i_activity, mode='full') for p in permutations])
-            # max_corr_shuffled = cp.max(cp.abs(shuffled_corr), axis=1).reshape(n_targets, n_shuffles)
-            # significance_thresholds = cp.percentile(max_corr_shuffled, (1 - p_value_threshold) * 100, axis=1)
-            # del expanded_targets, shuffled_indices, permutations, shuffled_corr, max_corr_shuffled
-            significance_thresholds = 94  # TODO simplification for now
-
-            # --- 2. Vectorized Actual Cross-Correlation ---
-            actual_corr = cp.stack([cp_correlate(t, neuron_i_activity, mode='full') for t in targets_j])
-            
-            # --- 3. Vectorized Peak Finding & Comparison ---
-            center_idx = actual_corr.shape[1] // 2
-            start = center_idx - max_lag
-            end = center_idx + max_lag + 1
-            corr_window = actual_corr[:, start:end]
-            peak_corr_vals = cp.max(cp.abs(corr_window), axis=1)
-
-            significant_mask = peak_corr_vals > significance_thresholds
-            significant_indices_local = cp.where(significant_mask)[0]
-
-            if significant_indices_local.size > 0:
-                significant_global_js = chunk_indices[significant_indices_local]
-                significant_windows = corr_window[significant_indices_local]
-                peak_lag_indices = cp.argmax(cp.abs(significant_windows), axis=1)
-                peak_lags = peak_lag_indices.get() - max_lag
-
-                for idx, lag in enumerate(peak_lags):
-                    j = significant_global_js[idx].item()
-                    if lag > 0:
-                        all_connections_for_i.append((i, j))
-                    else:
-                        all_connections_for_i.append((j, i))
-            
-            # Free memory explicitly after each chunk
-            del significance_thresholds, actual_corr, corr_window, peak_corr_vals, significant_mask
-            mempool.free_all_blocks()
-
-        if all_connections_for_i:
-            results_queue.put(all_connections_for_i)
 
 
 # --- CPU Implementation ---
