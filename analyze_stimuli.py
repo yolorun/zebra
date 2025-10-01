@@ -48,7 +48,7 @@ def read_and_analyze_stimuli(file_path, num_channels=10):
 
 if __name__ == '__main__':
     # The path to your stimuli file
-    stimuli_file = '/home/v/v/zebra/data/stimuli_raw/stimuli_and_ephys.10chFlt'
+    stimuli_file = '/home/v/proj/zebra/data/stimuli_raw/stimuli_and_ephys.10chFlt'
     
     # Call the function to read and analyze the data
     read_and_analyze_stimuli(stimuli_file)

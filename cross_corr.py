@@ -22,9 +22,9 @@ from zapbench import constants, data_utils
 cfg = {
     'traces_path': 'file:///home/v/proj/zebra/data/traces',
     'max_neurons': None,  # Limit neurons for faster processing, set to None for all
-    'max_lag': 1,  # Maximum time lag in steps to consider for correlation
-    'n_shuffles': 0,  # Number of shuffles for significance testing
-    'p_value_threshold': 0.001, # Significance level
+    'max_lag': 2,  # Maximum time lag in steps to consider for correlation
+    'n_shuffles': 50,  # Number of shuffles for significance testing
+    'p_value_threshold': 0.01, # Significance level
     'output_file': 'combined_connectivity_graph.pkl',
     'plot_dir': 'connectivity_plots',
     'use_gpu': True, # Set to False to use the CPU implementation
@@ -156,7 +156,7 @@ def gpu_process_wrapper_optimized(gpu_id, neuron_indices, data, max_lag, n_shuff
                 significant_window_counts = cp.zeros(n_targets, dtype=cp.int32)
 
                 # Loop over time windows
-                for t_start in range(0, num_timesteps - window_size, window_step):
+                for t_start in range(0, num_timesteps - window_size, window_step):  # TODO make this much faster!
                     t_end = t_start + window_size
                     
                     neuron_i_window = data_gpu[t_start:t_end, i]

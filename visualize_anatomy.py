@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import os
 
 # --- Configuration ---
-ANATOMY_DATA_PATH = 'file:///home/v/v/zebra/data/anatomy_clahe_ds'
-OUTPUT_DIR = '/home/v/v/zebra/analysis_results'
+ANATOMY_DATA_PATH = 'file:///home/v/proj/zebra/data/anatomy_clahe_ds'
+OUTPUT_DIR = '/home/v/proj/zebra/analysis_results'
 
 # --- 1. Load Data ---
 def load_volume(path):
