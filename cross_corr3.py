@@ -25,13 +25,12 @@ from zapbench import constants, data_utils
 cfg = {
     'traces_path': 'file:///home/v/proj/zebra/data/traces',
     'max_neurons': None,
-    'max_lag': 2,
-    'n_threshold_samples': 10000,
-    'p_value_threshold': 0.01,
+    'max_lag': 3,
+    'n_threshold_samples': 100000,
+    'p_value_threshold': 0.05,
     'output_file': 'connectivity_graph_global_threshold.pkl',
     'plot_dir': 'connectivity_plots_global',
-    'n_workers': 4,  # None = use all CPUs
-    'chunk_size': 100,  # Process this many source neurons at once
+    'n_workers': 5,  # None = use all CPUs
 }
 
 
@@ -219,6 +218,7 @@ def compute_global_threshold(data, n_samples, max_lag, p_value):
     signals_j = data[:, pairs_j].T  # (n_samples, n_timesteps)
     
     # Compute all correlations using FFT (vectorized)
+    print('Computing correlations...')
     correlations = batch_correlate_fft(signals_i, signals_j, max_lag)
     
     # Get max absolute correlation for each pair
@@ -244,7 +244,7 @@ def analyze_source_neuron(source_idx, data, threshold, max_lag):
         max_lag: maximum lag
     
     Returns:
-        list of (pre_synaptic, post_synaptic) connections
+        list of (pre_synaptic, post_synaptic, strength, lag) tuples
     """
 
     num_timesteps, num_neurons = data.shape
@@ -274,16 +274,17 @@ def analyze_source_neuron(source_idx, data, threshold, max_lag):
     significant_mask = peak_vals > threshold
     significant_targets = target_indices[significant_mask]
     significant_lags = peak_lags[significant_mask]
+    significant_strengths = peak_vals[significant_mask]
     
     # Determine directionality
     connections = []
-    for target_idx, lag in zip(significant_targets, significant_lags):
+    for target_idx, lag, strength in zip(significant_targets, significant_lags, significant_strengths):
         if lag > 0:
             # Positive lag: source leads target
-            connections.append((source_idx, target_idx))
+            connections.append((source_idx, target_idx, strength, lag))
         elif lag < 0:
             # Negative lag: target leads source
-            connections.append((target_idx, source_idx))
+            connections.append((target_idx, source_idx, strength, abs(lag)))
         # lag == 0: skip (no clear direction)
     
     print(f"Found {len(connections)} connections for source neuron {source_idx}", flush=True)
@@ -301,7 +302,7 @@ def calculate_connectivity(data, threshold, max_lag, n_workers):
         n_workers: number of parallel workers
     
     Returns:
-        connectivity: dict mapping post_synaptic -> list of pre_synaptic neurons
+        connectivity: dict mapping post_synaptic -> list of (pre_synaptic, strength, lag) tuples
     """
     num_timesteps, num_neurons = data.shape
     connectivity = {i: [] for i in range(num_neurons)}
@@ -327,8 +328,8 @@ def calculate_connectivity(data, threshold, max_lag, n_workers):
     # Aggregate results
     print("Aggregating results...")
     for connection_list in results:
-        for pre_synaptic, post_synaptic in connection_list:
-            connectivity[post_synaptic].append(pre_synaptic)
+        for pre_synaptic, post_synaptic, strength, lag in connection_list:
+            connectivity[post_synaptic].append((pre_synaptic, strength, lag))
     
     return connectivity
 
@@ -364,7 +365,7 @@ def plot_connectivity_examples(data, connectivity, max_lag, plot_dir, n_examples
     # Get connected pairs
     connected_pairs_set = set()
     for post_synaptic, pre_synaptics in connectivity.items():
-        for pre_synaptic in pre_synaptics:
+        for pre_synaptic, strength, lag in pre_synaptics:
             connected_pairs_set.add(tuple(sorted((pre_synaptic, post_synaptic))))
     
     connected_pairs = list(connected_pairs_set)
@@ -429,8 +430,8 @@ def plot_connectivity_graph(connectivity, plot_dir):
     
     G = nx.DiGraph()
     for post_synaptic, pre_synaptics in connectivity.items():
-        for pre_synaptic in pre_synaptics:
-            G.add_edge(pre_synaptic, post_synaptic)
+        for pre_synaptic, strength, lag in pre_synaptics:
+            G.add_edge(pre_synaptic, post_synaptic, weight=strength, lag=lag)
     
     if not G.nodes():
         print("No connections found, skipping network graph plot.")
@@ -483,6 +484,7 @@ def plot_pair_analysis(data, neuron_i_idx, neuron_j_idx, max_lag, axes):
 
 if __name__ == '__main__':
     os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning,ignore::FutureWarning'
+    np.random.seed(42)
     
     try:
         mp.set_start_method('spawn')
