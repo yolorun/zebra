@@ -15,6 +15,7 @@ import random
 import networkx as nx
 import multiprocessing as mp
 from functools import partial
+import psutil
 
 import cupy as cp
 use_gpu = True
@@ -26,9 +27,11 @@ cfg = {
     'traces_path': 'file:///home/v/proj/zebra/data/traces',
     'max_neurons': None,
     'max_lag': 3,
-    'n_threshold_samples': 100000,
+    'n_threshold_samples': 95000,
     'p_value_threshold': 0.05,
     'output_file': 'connectivity_graph_global_threshold.pkl',
+    'checkpoint_file': 'connectivity_checkpoint.pkl',
+    'config_file': 'connectivity_config.pkl',
     'plot_dir': 'connectivity_plots_global',
     'n_workers': 5,  # None = use all CPUs
 }
@@ -287,11 +290,11 @@ def analyze_source_neuron(source_idx, data, threshold, max_lag):
             connections.append((target_idx, source_idx, strength, abs(lag)))
         # lag == 0: skip (no clear direction)
     
-    print(f"Found {len(connections)} connections for source neuron {source_idx}", flush=True)
+    # print(f"Found {len(connections)} connections for source neuron {source_idx}", flush=True)
     return connections
 
 
-def calculate_connectivity(data, threshold, max_lag, n_workers):
+def calculate_connectivity(data, threshold, max_lag, n_workers, checkpoint_file=None):
     """
     Calculate connectivity for all neuron pairs using parallel processing.
     
@@ -300,14 +303,33 @@ def calculate_connectivity(data, threshold, max_lag, n_workers):
         threshold: pre-computed significance threshold
         max_lag: maximum lag
         n_workers: number of parallel workers
+        checkpoint_file: path to checkpoint file for resume capability
     
     Returns:
         connectivity: dict mapping post_synaptic -> list of (pre_synaptic, strength, lag) tuples
     """
     num_timesteps, num_neurons = data.shape
     connectivity = {i: [] for i in range(num_neurons)}
+    processed_neurons = set()
+    
+    # Try to load checkpoint
+    if checkpoint_file and os.path.exists(checkpoint_file):
+        print(f"WARNING: Loading checkpoint from {checkpoint_file}")
+        with open(checkpoint_file, 'rb') as f:
+            checkpoint = pickle.load(f)
+        connectivity = checkpoint['connectivity']
+        processed_neurons = checkpoint['processed_neurons']
+        print(f"Resuming from checkpoint: {len(processed_neurons)}/{num_neurons} neurons already processed")
+    
+    # Get list of neurons to process
+    neurons_to_process = [i for i in range(num_neurons) if i not in processed_neurons]
+    
+    if not neurons_to_process:
+        print("All neurons already processed!")
+        return connectivity
     
     print(f"Calculating connectivity using {n_workers} CPU workers...")
+    print(f"Processing {len(neurons_to_process)} neurons...")
     
     # Create worker function with fixed arguments
     worker_func = partial(
@@ -317,19 +339,47 @@ def calculate_connectivity(data, threshold, max_lag, n_workers):
         max_lag=max_lag
     )
     
-    # Parallel processing
+    # Parallel processing - stream results to avoid memory accumulation
+    print("Analyzing neurons and aggregating results...")
     with mp.Pool(n_workers) as pool:
-        results = list(tqdm(
-            pool.imap_unordered(worker_func, range(num_neurons)),
-            total=num_neurons,
+        for i, (neuron_idx, connection_list) in enumerate(tqdm(
+            zip(neurons_to_process, pool.imap_unordered(worker_func, neurons_to_process)),
+            total=len(neurons_to_process),
             desc="Analyzing neurons"
-        ))
+        )):
+            # Aggregate immediately, don't accumulate in memory
+            for pre_synaptic, post_synaptic, strength, lag in connection_list:
+                connectivity[post_synaptic].append((pre_synaptic, strength, lag))
+            
+            # Mark as processed
+            processed_neurons.add(neuron_idx)
+            
+            # Save checkpoint every 100 neurons
+            if i % 100 == 0:
+                checkpoint = {
+                    'connectivity': connectivity,
+                    'processed_neurons': processed_neurons
+                }
+                with open(checkpoint_file, 'wb') as f:
+                    pickle.dump(checkpoint, f)
+                
+                # Get memory stats
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                vm = psutil.virtual_memory()
+                
+                print(f"Checkpoint saved | Processed: {len(processed_neurons)}/{num_neurons} | "
+                      f"Process RSS: {mem_info.rss / 1e9:.2f}GB | "
+                      f"System Free: {vm.available / 1e9:.2f}GB / {vm.total / 1e9:.2f}GB ({vm.percent}% used)",
+                      flush=True)
     
-    # Aggregate results
-    print("Aggregating results...")
-    for connection_list in results:
-        for pre_synaptic, post_synaptic, strength, lag in connection_list:
-            connectivity[post_synaptic].append((pre_synaptic, strength, lag))
+    # Save final checkpoint
+    checkpoint = {
+        'connectivity': connectivity,
+        'processed_neurons': processed_neurons
+    }
+    with open(checkpoint_file, 'wb') as f:
+        pickle.dump(checkpoint, f)
     
     return connectivity
 
@@ -497,36 +547,73 @@ if __name__ == '__main__':
     
     # Load all data (ignoring conditions)
     neural_data = load_all_data(cfg['traces_path'], cfg['max_neurons'])
+    num_neurons = neural_data.shape[1]
     
-    # Compute global threshold from random pairs
-    threshold, null_dist = compute_global_threshold(
-        neural_data,
-        cfg['n_threshold_samples'],
-        cfg['max_lag'],
-        cfg['p_value_threshold']
-    )
+    # Try to load config (threshold, etc.)
+    threshold = None
+    null_dist = None
+    sparsity_rate = None
     
-    # Validate sparsity assumption
-    print("\nValidating sparsity assumption...")
-    test_samples = 1000
-    _, test_dist = compute_global_threshold(
-        neural_data,
-        test_samples,
-        cfg['max_lag'],
-        p_value=1.0
-    )
-    sparsity_rate = (test_dist > threshold).sum() / test_samples
-    print(f"Estimated connectivity rate: {sparsity_rate:.2%}")
+    if os.path.exists(cfg['config_file']):
+        print(f"WARNING: Loading threshold and config from {cfg['config_file']}")
+        with open(cfg['config_file'], 'rb') as f:
+            saved_config = pickle.load(f)
+        
+        # Validate
+        if saved_config['num_neurons'] != num_neurons:
+            print(f"ERROR: Config file has {saved_config['num_neurons']} neurons but data has {num_neurons}")
+            print("Recomputing threshold...")
+        else:
+            threshold = saved_config['threshold']
+            null_dist = saved_config['null_dist']
+            sparsity_rate = saved_config['sparsity_rate']
+            print(f"Loaded threshold: {threshold:.4f}")
     
-    if sparsity_rate > 0.10:
-        print("WARNING: Connectivity rate > 10%, sparsity assumption may be violated!")
+    # Compute threshold if not loaded
+    if threshold is None:
+        # Compute global threshold from random pairs
+        threshold, null_dist = compute_global_threshold(
+            neural_data,
+            cfg['n_threshold_samples'],
+            cfg['max_lag'],
+            cfg['p_value_threshold']
+        )
+        
+        # Validate sparsity assumption
+        print("\nValidating sparsity assumption...")
+        test_samples = 1000
+        _, test_dist = compute_global_threshold(
+            neural_data,
+            test_samples,
+            cfg['max_lag'],
+            p_value=1.0
+        )
+        sparsity_rate = (test_dist > threshold).sum() / test_samples
+        print(f"Estimated connectivity rate: {sparsity_rate:.2%}")
+        
+        if sparsity_rate > 0.10:
+            print("WARNING: Connectivity rate > 10%, sparsity assumption may be violated!")
+        
+        # Save config
+        saved_config = {
+            'threshold': threshold,
+            'null_dist': null_dist,
+            'sparsity_rate': sparsity_rate,
+            'num_neurons': num_neurons,
+            'max_lag': cfg['max_lag'],
+            'config': cfg
+        }
+        with open(cfg['config_file'], 'wb') as f:
+            pickle.dump(saved_config, f)
+        print(f"Saved config to {cfg['config_file']}")
     
     # Calculate connectivity
     connectivity_graph = calculate_connectivity(
         neural_data,
         threshold,
         cfg['max_lag'],
-        n_workers
+        n_workers,
+        checkpoint_file=cfg['checkpoint_file']
     )
     
     n_connections = sum(len(v) for v in connectivity_graph.values())
