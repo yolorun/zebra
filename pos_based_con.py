@@ -85,11 +85,18 @@ def build_connectivity_graph(positions, distance_threshold, chunk_size):
             # Convert local chunk index to global index
             src_global_idx = chunk_start + src_local_idx
             
-            id1 = neuron_ids[src_global_idx]
-            id2 = neuron_ids[tgt_idx]
+            pre_synaptic_id = neuron_ids[src_global_idx]
+            post_synaptic_id = neuron_ids[tgt_idx]
+            
             dist = dist_chunk[src_local_idx, tgt_idx]
             
-            connectivity[id1].append((id2, dist))
+            # Calculate signed position difference (post - pre)
+            pos_pre = pos_array[src_global_idx]
+            pos_post = pos_array[tgt_idx]
+            pos_diff = tuple(pos_post - pos_pre) # (dz, dy, dx)
+            
+            strength = 1. / max(dist, 1.)
+            connectivity[post_synaptic_id].append((pre_synaptic_id, strength, pos_diff))
             
     return connectivity
 
@@ -104,10 +111,10 @@ def visualize_graph(positions, connectivity):
     pos = {neuron_id: (coords[2], coords[1]) for neuron_id, coords in positions.items()}
     
     # Add nodes and edges from the connectivity data
-    for neuron_id, neighbors in connectivity.items():
-        G.add_node(neuron_id)
-        for neighbor_id, _ in neighbors:
-            G.add_edge(neuron_id, neighbor_id)
+    for post_synaptic_id, connections in connectivity.items():
+        G.add_node(post_synaptic_id)
+        for pre_synaptic_id, _, _ in connections:
+            G.add_edge(pre_synaptic_id, post_synaptic_id)
             
     plt.figure(figsize=(15, 15))
     nx.draw(
@@ -149,9 +156,9 @@ def main():
 
     # --- Build Connectivity Graph and Save ---
     connectivity = build_connectivity_graph(positions, args.distance_threshold, chunk_size=2000)
-    with open('connectivity_graph.pkl', 'wb') as f:
+    with open('connectivity_graph_pos.pkl', 'wb') as f:
         pickle.dump(connectivity, f)
-    print(f"Saved connectivity graph to connectivity_graph.pkl")
+    print(f"Saved connectivity graph to connectivity_graph_pos.pkl")
 
     # --- Visualize ---
     visualize_graph(positions, connectivity)
