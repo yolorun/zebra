@@ -570,7 +570,7 @@ def main():
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
         'use_gradient_checkpointing': True,  # Trade compute for memory (40-50% VRAM savings)
-        'bptt_chunk_size': 8,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
+        'bptt_chunk_size': 0,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
         'scheduler_type': 'cosine',  # 'cosine' or 'reduce_on_plateau'
         'warmup_steps': 100,  # Number of warmup steps (0 for no warmup)
         'min_lr': 1e-6,  # Minimum learning rate
