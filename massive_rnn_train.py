@@ -59,11 +59,58 @@ import random
 from scipy.stats import zscore
 from tqdm import tqdm
 import wandb
+import argparse
 
 import bitsandbytes as bnb
 
 # Import our sparse GRU model
 from sparse_gru import SparseGRUBrain
+
+def parse_param_value(key, value_str, cfg):
+    """Parse a parameter value string to the appropriate type."""
+    if value_str == 'None':
+        return None
+    if value_str == 'True':
+        return True
+    if value_str == 'False':
+        return False
+    
+    # If key exists in cfg, try to match its type
+    if key in cfg:
+        original_type = type(cfg[key])
+        if original_type == bool:
+            return value_str.lower() in ('true', '1', 'yes')
+        if original_type == int:
+            return int(value_str)
+        if original_type == float:
+            return float(value_str)
+        if cfg[key] is None:
+            # Original was None, infer from string
+            try:
+                return int(value_str)
+            except ValueError:
+                try:
+                    return float(value_str)
+                except ValueError:
+                    return value_str
+    
+    # Try to infer type from string
+    try:
+        if '.' in value_str:
+            return float(value_str)
+        return int(value_str)
+    except ValueError:
+        return value_str
+
+def parse_params(params_list, cfg):
+    """Parse --params arguments and return dict of overrides."""
+    overrides = {}
+    for param in params_list:
+        if '=' not in param:
+            raise ValueError(f"Invalid param format: {param}. Expected key=value")
+        key, value_str = param.split('=', 1)
+        overrides[key] = parse_param_value(key, value_str, cfg)
+    return overrides
 
 def set_seed(seed):
     """Set all random seeds for reproducibility."""
@@ -452,6 +499,11 @@ class MassiveRNNModule(pl.LightningModule):
 def main():
     """Main training function."""
     
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Train Massive RNN on calcium traces')
+    parser.add_argument('--params', nargs='*', default=[], help='Override cfg params: key1=value1 key2=value2')
+    args = parser.parse_args()
+    
     # Configuration
     cfg = {
         # Data paths
@@ -463,22 +515,22 @@ def main():
         # Data parameters
         'condition_name': None,  # None for all data, or 'turning', 'swimming', etc.
         'max_neurons': None,  # Start with small subset for testing, None for all neurons
-        'sequence_length': 2,  # Length of input sequences
+        'sequence_length': 16,  # Length of input sequences
         'prediction_horizon': 1,  # How many steps ahead to predict
         'train_val_split': 0.9,  # Train/validation split ratio
         'normalize_traces': False,  # Whether to z-score normalize traces
         'nonzero_calc': True,  # Clip calcium traces to non-negative values
         
         # Model parameters
-        'hidden_dim': 2,  # Hidden dimension for GRUs
+        'hidden_dim': 4,  # Hidden dimension for GRUs
         'stimulus_dim': 0,  # TODO Dimension of stimulus input
         'include_self_connections': True,  # Add self-connections to graph
-        'min_connection_strength': 0.1,  # TODO Minimum strength to include connection
+        'min_connection_strength': 0.08,  # TODO Minimum strength to include connection
         'use_bias': True,  # Use bias in GRU gates
         
         # Training parameters
-        'batch_size': 1,  # Batch size (reduce if OOM)
-        'accumulate_grad_batches': 32,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
+        'batch_size': 2,  # Batch size (reduce if OOM)
+        'accumulate_grad_batches': 16,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
         'learning_rate': 1e-3,  # Initial learning rate
         'weight_decay': 1e-5,  # L2 regularization
         'max_epochs': 50,  # Maximum training epochs
@@ -494,12 +546,12 @@ def main():
         # Hardware and performance
         'accelerator': 'gpu',  # 'gpu' or 'cpu'
         'devices': 1,  # Number of GPUs
-        'strategy': 'deepspeed_stage_3',  # Training strategy: 'auto', 'ddp', 'deepspeed_stage_2', 'deepspeed_stage_3'
+        'strategy': 'deepspeed_stage_2',  # Training strategy: 'auto', 'ddp', 'deepspeed_stage_2', 'deepspeed_stage_3'
         'precision': '32',  # '16-mixed',  # Mixed precision training
         'gradient_clip_val': 1.0,  # Gradient clipping
-        'num_workers': 4,  # DataLoader workers
-        'prefetch_factor': 2,  # DataLoader prefetch factor
-        'pin_memory': False,  # Pin memory for faster GPU transfer (uses more memory)
+        'num_workers': 8,  # DataLoader workers
+        'prefetch_factor': 4,  # DataLoader prefetch factor
+        'pin_memory': True,  # Pin memory for faster GPU transfer (uses more memory)
         
         # Logging and checkpointing
         'project_name': 'zebra-neuron-forecasting',  # W&B project name
@@ -510,6 +562,12 @@ def main():
         # Reproducibility
         'seed': 42,
     }
+    
+    # Override cfg with command-line params
+    if args.params:
+        overrides = parse_params(args.params, cfg)
+        print(f"Overriding cfg with: {overrides}")
+        cfg.update(overrides)
     
     # Set random seed
     set_seed(cfg['seed'])
