@@ -516,7 +516,7 @@ def main():
         # Data parameters
         'condition_name': None,  # None for all data, or 'turning', 'swimming', etc.
         'max_neurons': None,  # Start with small subset for testing, None for all neurons
-        'sequence_length': 16,  # Length of input sequences
+        'sequence_length': 32,  # Length of input sequences
         'prediction_horizon': 1,  # How many steps ahead to predict
         'train_val_split': 0.9,  # Train/validation split ratio
         'normalize_traces': False,  # Whether to z-score normalize traces
@@ -547,7 +547,7 @@ def main():
         # Hardware and performance
         'accelerator': 'gpu',  # 'gpu' or 'cpu'
         'devices': 1,  # Number of GPUs
-        'strategy': 'deepspeed_stage_2',  # Training strategy: 'auto', 'ddp', 'deepspeed_stage_2', 'deepspeed_stage_3'
+        'strategy': 'auto',  # Training strategy: 'auto', 'ddp', 'deepspeed_stage_2', 'deepspeed_stage_3'
         'precision': '32',  # '16-mixed',  # Mixed precision training
         'gradient_clip_val': 1.0,  # Gradient clipping
         'num_workers': 8,  # DataLoader workers

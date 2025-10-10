@@ -62,6 +62,8 @@ class SparseGRUBrain(nn.Module):
         # Pre-build sparse tensor shapes for efficiency
         self.sparse_shape = (N * H, N)
 
+        self._build_csr_template()
+
     def _build_sparse_indices(self, edge_list, N, H):
         """
         Build sparse indices for efficient sparse matrix multiplication.
@@ -77,26 +79,68 @@ class SparseGRUBrain(nn.Module):
 
         return torch.LongTensor(indices).T  # Shape: (2, num_edges * H)
 
+    def _build_csr_template(self):
+        """Build CSR template structure once to avoid repeated conversions."""
+        # Create a dummy COO tensor with ones
+        dummy_values = torch.ones(self.W_indices.shape[1])
+        W_coo = torch.sparse_coo_tensor(
+            self.W_indices,
+            dummy_values,
+            self.sparse_shape
+        ).coalesce()
+        
+        # Convert to CSR and store the structure
+        W_csr = W_coo.to_sparse_csr()
+        
+        # Store CSR indices (these don't change, only values do)
+        self.register_buffer('csr_crow_indices', W_csr.crow_indices())
+        self.register_buffer('csr_col_indices', W_csr.col_indices())
+
     def _sparse_matmul(self, values, input_tensor):
         """
-        Efficient sparse matrix multiplication with pre-computed indices.
+        Efficient sparse matrix multiplication using pre-built CSR structure.
+        No conversion overhead - just update values.
         """
-        W = torch.sparse_coo_tensor(
-            self.W_indices,
+        # Create CSR tensor directly using pre-computed structure
+        W_csr = torch.sparse_csr_tensor(
+            self.csr_crow_indices,
+            self.csr_col_indices,
             values,
-            self.sparse_shape,
+            size=self.sparse_shape,
             dtype=input_tensor.dtype,
             device=input_tensor.device
         )
-        # Coalesce for efficiency (combines duplicate indices)
-        W = W.coalesce()
 
         # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
-        output = torch.sparse.mm(W, input_tensor.T).T
+        output = (W_csr @ input_tensor.T).T
 
         # Reshape to (B, N, H)
         B = input_tensor.shape[0]
         return output.reshape(B, self.num_neurons, self.hidden_dim)
+
+    # COO version
+    # def _sparse_matmul(self, values, input_tensor):
+    #     """
+    #     Efficient sparse matrix multiplication with pre-computed indices.
+    #     """
+    #     W = torch.sparse_coo_tensor(
+    #         self.W_indices,
+    #         values,
+    #         self.sparse_shape,
+    #         dtype=input_tensor.dtype,
+    #         device=input_tensor.device
+    #     )
+    #     # Coalesce for efficiency (combines duplicate indices)
+    #     W = W.coalesce()
+
+    #     # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
+    #     output = torch.sparse.mm(W, input_tensor.T).T
+
+    #     # Reshape to (B, N, H)
+    #     B = input_tensor.shape[0]
+    #     return output.reshape(B, self.num_neurons, self.hidden_dim)
+
+
 
     def forward(self, calcium_t, hidden, stimulus_t=None):
         """
