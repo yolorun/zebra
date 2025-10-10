@@ -128,25 +128,23 @@ def set_seed(seed):
 class CalciumTracesDataset(Dataset):
     """Dataset for calcium traces with stimulus."""
     
-    def __init__(self, traces, stimulus, sequence_length, prediction_horizon=1, noise_std=0.0, apply_clip=True):
+    def __init__(self, traces, stimulus, sequence_length, noise_std=0.0, apply_clip=True):
         """
         Args:
             traces: (n_timesteps, n_neurons) array of calcium traces
             stimulus: (n_timesteps, stimulus_dim) array of stimulus data
             sequence_length: length of input sequences
-            prediction_horizon: how many steps ahead to predict (default 1)
             noise_std: standard deviation of Gaussian noise to add (default 0.0)
             apply_clip: whether to clip to non-negative values (default True)
         """
         self.traces = torch.from_numpy(traces).float()
         self.stimulus = torch.from_numpy(stimulus).float()
         self.sequence_length = sequence_length
-        self.prediction_horizon = prediction_horizon
         self.noise_std = noise_std
         self.apply_clip = apply_clip
         
         self.n_timesteps, self.n_neurons = self.traces.shape
-        self.n_samples = self.n_timesteps - sequence_length - prediction_horizon + 1
+        self.n_samples = self.n_timesteps - sequence_length
         
         print(f"Dataset initialized: {self.n_samples} samples, {self.n_neurons} neurons")
     
@@ -157,24 +155,22 @@ class CalciumTracesDataset(Dataset):
         # Get sequence window
         start_idx = idx
         end_idx = start_idx + self.sequence_length
-        target_idx = end_idx + self.prediction_horizon - 1
         
-        # Extract sequences
-        calcium_seq = self.traces[start_idx:end_idx, :]  # (seq_len, n_neurons)
+        # Extract clean sequences
+        calcium_seq_clean = self.traces[start_idx:end_idx, :]  # (seq_len, n_neurons)
         stimulus_seq = self.stimulus[start_idx:end_idx, :]  # (seq_len, stimulus_dim)
-        target = self.traces[target_idx, :]  # (n_neurons,)
         
-        # Add noise if specified
+        # Create noisy version
+        calcium_seq_noisy = calcium_seq_clean
         if self.noise_std > 0:
-            calcium_seq = calcium_seq + torch.randn_like(calcium_seq) * self.noise_std
-            # target = target + torch.randn_like(target) * self.noise_std
-        
-        # Clip to non-negative values if specified
+            calcium_seq_noisy = calcium_seq_noisy + torch.randn_like(calcium_seq_noisy) * self.noise_std
+
         if self.apply_clip:
-            calcium_seq = torch.clamp(calcium_seq, min=0)
-            target = torch.clamp(target, min=0)
+            calcium_seq_clean = torch.clamp(calcium_seq_clean, min=0)
+            calcium_seq_noisy = torch.clamp(calcium_seq_noisy, min=0)
         
-        return calcium_seq, stimulus_seq, target
+        # Return: noisy input, stimulus, clean target
+        return calcium_seq_noisy, stimulus_seq, calcium_seq_clean
 
 
 class CalciumDataModule(pl.LightningDataModule):
@@ -274,13 +270,13 @@ class CalciumDataModule(pl.LightningDataModule):
         # Train dataset gets noise, validation doesn't
         self.train_dataset = CalciumTracesDataset(
             train_traces, train_stimulus,
-            self.cfg['sequence_length'], self.cfg['prediction_horizon'],
+            self.cfg['sequence_length'],
             noise_std=self.cfg.get('noise_std', 0.0),
             apply_clip=self.cfg.get('nonzero_calc', True)
         )
         self.val_dataset = CalciumTracesDataset(
             val_traces, val_stimulus,
-            self.cfg['sequence_length'], self.cfg['prediction_horizon'],
+            self.cfg['sequence_length'],
             noise_std=0.0,  # No noise for validation
             apply_clip=self.cfg.get('nonzero_calc', True)
         )
@@ -363,8 +359,8 @@ class MassiveRNNModule(pl.LightningModule):
         return outputs
     
     def training_step(self, batch, batch_idx):
-        calcium_seq, stimulus_seq, targets = batch
-        batch_size, seq_len, n_neurons = calcium_seq.shape
+        calcium_seq_noisy, stimulus_seq, calcium_seq_clean = batch
+        batch_size, seq_len, n_neurons = calcium_seq_noisy.shape
         
         # Initialize hidden state
         hidden = self.model.init_hidden(batch_size, device=self.device)
@@ -379,9 +375,9 @@ class MassiveRNNModule(pl.LightningModule):
             if bptt_chunk_size > 0 and t > 0 and t % bptt_chunk_size == 0:
                 hidden = hidden.detach()
             
-            calcium_t = calcium_seq[:, t, :]
+            calcium_t = calcium_seq_noisy[:, t, :]  # Noisy input
             stimulus_t = stimulus_seq[:, t, :]
-            target_t = calcium_seq[:, t + 1, :]  # Next timestep
+            target_t = calcium_seq_clean[:, t + 1, :]  # Clean target (next timestep)
             
             # Forward pass with optional gradient checkpointing
             if self.use_gradient_checkpointing:
@@ -405,33 +401,36 @@ class MassiveRNNModule(pl.LightningModule):
         return avg_loss
     
     def validation_step(self, batch, batch_idx):
-        calcium_seq, stimulus_seq, targets = batch
-        batch_size, seq_len, n_neurons = calcium_seq.shape
+        calcium_seq_noisy, stimulus_seq, calcium_seq_clean = batch
+        batch_size, seq_len, n_neurons = calcium_seq_clean.shape
         
         # Initialize hidden state
         hidden = self.model.init_hidden(batch_size, device=self.device)
         
-        # Teacher forcing evaluation
+        # Teacher forcing evaluation (use clean inputs for validation)
         tf_losses = []
+        mae_losses = []
         for t in range(seq_len - 1):
-            calcium_t = calcium_seq[:, t, :]
+            calcium_t = calcium_seq_clean[:, t, :]  # Clean input for validation
             stimulus_t = stimulus_seq[:, t, :]
-            target_t = calcium_seq[:, t + 1, :]
+            target_t = calcium_seq_clean[:, t + 1, :]  # Clean target
             
             calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
             tf_losses.append(self.mse_loss(calcium_pred, target_t))
+            mae_losses.append(self.mae_loss(calcium_pred, target_t))
         
         avg_tf_loss = torch.stack(tf_losses).mean()
+        avg_mae = torch.stack(mae_losses).mean()
         
         # Autoregressive evaluation (predict multiple steps ahead)
         if self.autoregressive_steps > 1 and seq_len > self.autoregressive_steps:
             hidden_ar = self.model.init_hidden(batch_size, device=self.device)
-            calcium_ar = calcium_seq[:, 0, :]  # Start from first timestep
+            calcium_ar = calcium_seq_clean[:, 0, :]  # Start from first timestep
             
             ar_loss = 0
             for t in range(min(self.autoregressive_steps, seq_len - 1)):
                 stimulus_t = stimulus_seq[:, t, :]
-                target_t = calcium_seq[:, t + 1, :]
+                target_t = calcium_seq_clean[:, t + 1, :]
                 
                 # Predict next step
                 calcium_ar, hidden_ar = self.model(calcium_ar, hidden_ar, stimulus_t)
@@ -440,12 +439,9 @@ class MassiveRNNModule(pl.LightningModule):
             avg_ar_loss = ar_loss / min(self.autoregressive_steps, seq_len - 1)
             self.log('val_ar_loss', avg_ar_loss, on_epoch=True, prog_bar=False, logger=True)
         
-        # Compute MAE for interpretability
-        mae = self.mae_loss(calcium_pred, target_t)
-        
         # Logging
         self.log('val_loss', avg_tf_loss, on_epoch=True, prog_bar=True, logger=True)
-        self.log('val_mae', mae, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_mae', avg_mae, on_epoch=True, prog_bar=True, logger=True)
         
         return avg_tf_loss
     
@@ -552,7 +548,6 @@ def main():
         'condition_name': None,  # None for all data, or 'turning', 'swimming', etc.
         'max_neurons': None,  # Start with small subset for testing, None for all neurons
         'sequence_length': 32,  # Length of input sequences
-        'prediction_horizon': 1,  # How many steps ahead to predict
         'train_val_split': 0.9,  # Train/validation split ratio
         'normalize_traces': False,  # Whether to z-score normalize traces
         'noise_std': 0.08,  # Standard deviation of Gaussian noise to add to traces
