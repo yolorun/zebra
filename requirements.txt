@@ -20,9 +20,12 @@ torchvision
 torchio
 lightning
 safetensors
+bitsandbytes
+deepspeed
 
 transformers
 accelerate
 vector-quantize-pytorch
 networkx
 cupy-cuda11x
+gsutil
