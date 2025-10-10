@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=massive_rnn
 #SBATCH --output=./logs/%x_%j.out
-#SBATCH --error=./logs/%x_%j.err
 #SBATCH --time=72:00:00
 #SBATCH --partition=ml_gpus
 #SBATCH --gres=gpu:1
@@ -69,7 +68,7 @@ export PYTHONPATH="${PYTHONPATH}:/home/v/proj/zebra"
 export WANDB_PROJECT="zebra-neuron-forecasting"
 # export WANDB_ENTITY="your_entity"
 export WANDB_NAME="${WANDB_RUN_NAME:-"massive-rnn-$SLURM_JOB_ID"}"
-export WANDB_TAGS="gpu${CUDA_VISIBLE_DEVICES},${WANDB_RUN_NAME}"
+export WANDB_TAGS="gpu${CUDA_VISIBLE_DEVICES}"
 
 # Print summary
 echo "--- Job Summary ---"
