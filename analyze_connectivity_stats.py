@@ -542,8 +542,8 @@ def main():
                        help='Path to input pickle file containing connectivity graph')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for reproducibility (default: 42)')
-    parser.add_argument('--output_dir', type=str, default='/tmp',
-                       help='Directory to save plots (default: /tmp)')
+    parser.add_argument('--output_dir', type=str, default='./tmp',
+                       help='Directory to save plots (default: ./tmp)')
     parser.add_argument('--dpi', type=int, default=300,
                        help='DPI for saved plots (default: 300)')
     

@@ -96,64 +96,61 @@ class SparseGRUBrain(nn.Module):
     #     self.register_buffer('csr_crow_indices', W_csr.crow_indices())
     #     self.register_buffer('csr_col_indices', W_csr.col_indices())
 
-    def _sparse_matmul(self, values, input_tensor):
-        """
-        Efficient sparse matrix multiplication with float32 weights.
-        Forces float32 computation by disabling autocast for this operation.
-        """
-        # Store original dtype for casting back
-        original_dtype = input_tensor.dtype
-        
-        # Disable autocast and force float32 for sparse operations
-        with torch.cuda.amp.autocast(enabled=False):
-            # Cast to float32
-            input_fp32 = input_tensor.float()
-            values_fp32 = values.float()
-            
-            # Create COO sparse tensor in float32
-            W = torch.sparse_coo_tensor(
-                self.W_indices,
-                values_fp32,
-                self.sparse_shape,
-                dtype=torch.float32,
-                device=input_tensor.device
-            )
-            W = W.coalesce()
-
-            # Sparse matmul in float32
-            output = torch.sparse.mm(W, input_fp32.T).T
-        
-        # Cast back to original dtype after leaving the no-autocast context
-        if original_dtype != torch.float32:
-            output = output.to(original_dtype)
-
-        # Reshape to (B, N, H)
-        B = input_tensor.shape[0]
-        return output.reshape(B, self.num_neurons, self.hidden_dim)
-
-    # COO version
     # def _sparse_matmul(self, values, input_tensor):
     #     """
-    #     Efficient sparse matrix multiplication with pre-computed indices.
+    #     Efficient sparse matrix multiplication with float32 weights.
+    #     Forces float32 computation by disabling autocast for this operation.
     #     """
-    #     W = torch.sparse_coo_tensor(
-    #         self.W_indices,
-    #         values,
-    #         self.sparse_shape,
-    #         dtype=input_tensor.dtype,
-    #         device=input_tensor.device
-    #     )
-    #     # Coalesce for efficiency (combines duplicate indices)
-    #     W = W.coalesce()
+    #     # Store original dtype for casting back
+    #     original_dtype = input_tensor.dtype
+        
+    #     # Disable autocast and force float32 for sparse operations
+    #     with torch.cuda.amp.autocast(enabled=False):
+    #         # Cast to float32
+    #         input_fp32 = input_tensor.float()
+    #         values_fp32 = values.float()
+            
+    #         # Create COO sparse tensor in float32
+    #         W = torch.sparse_coo_tensor(
+    #             self.W_indices,
+    #             values_fp32,
+    #             self.sparse_shape,
+    #             dtype=torch.float32,
+    #             device=input_tensor.device
+    #         )
+    #         W = W.coalesce()
 
-    #     # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
-    #     output = torch.sparse.mm(W, input_tensor.T).T
+    #         # Sparse matmul in float32
+    #         output = torch.sparse.mm(W, input_fp32.T).T
+        
+    #     # Cast back to original dtype after leaving the no-autocast context
+    #     if original_dtype != torch.float32:
+    #         output = output.to(original_dtype)
 
     #     # Reshape to (B, N, H)
     #     B = input_tensor.shape[0]
     #     return output.reshape(B, self.num_neurons, self.hidden_dim)
 
+    def _sparse_matmul(self, values, input_tensor):
+        """
+        Efficient sparse matrix multiplication with pre-computed indices.
+        """
+        W = torch.sparse_coo_tensor(
+            self.W_indices,
+            values,
+            self.sparse_shape,
+            dtype=input_tensor.dtype,
+            device=input_tensor.device
+        )
+        # Coalesce for efficiency (combines duplicate indices)
+        W = W.coalesce()
 
+        # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
+        output = torch.sparse.mm(W, input_tensor.T).T
+
+        # Reshape to (B, N, H)
+        B = input_tensor.shape[0]
+        return output.reshape(B, self.num_neurons, self.hidden_dim)
 
     def forward(self, calcium_t, hidden, stimulus_t=None):
         """
