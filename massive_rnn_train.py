@@ -48,6 +48,7 @@ before training, or set WANDB_MODE=offline for local logging.
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.checkpoint import checkpoint
 import pytorch_lightning as pl
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
@@ -302,6 +303,7 @@ class MassiveRNNModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(cfg)
         self.num_neurons = num_neurons
+        self.use_gradient_checkpointing = cfg.get('use_gradient_checkpointing', False)
         
         # Create the sparse GRU model from connectivity graph
         # Determine if connectivity graph uses 0-indexed or 1-indexed neuron IDs
@@ -360,8 +362,14 @@ class MassiveRNNModule(pl.LightningModule):
             stimulus_t = stimulus_seq[:, t, :]
             target_t = calcium_seq[:, t + 1, :]  # Next timestep
             
-            # Forward pass
-            calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
+            # Forward pass with optional gradient checkpointing
+            if self.use_gradient_checkpointing:
+                calcium_pred, hidden = checkpoint(
+                    self.model, calcium_t, hidden, stimulus_t,
+                    use_reentrant=False
+                )
+            else:
+                calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
             
             # Compute loss
             loss = self.mse_loss(calcium_pred, target_t)
@@ -538,8 +546,7 @@ def main():
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
-        
-        # Optimizer settings
+        'use_gradient_checkpointing': True,  # Trade compute for memory (40-50% VRAM savings)
         'scheduler_type': 'cosine',  # 'cosine' or 'reduce_on_plateau'
         'warmup_epochs': 1,  # Number of warmup epochs (0 for no warmup)
         'min_lr': 1e-6,  # Minimum learning rate

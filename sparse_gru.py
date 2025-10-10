@@ -140,7 +140,7 @@ class SparseGRUBrain(nn.Module):
         original_dtype = input_tensor.dtype
         
         # Disable autocast and force float32 for sparse operations
-        with torch.cuda.amp.autocast(enabled=False):
+        with torch.amp.autocast('cuda', enabled=False):
             # Cast to float32
             input_fp32 = input_tensor.float()
             values_fp32 = values.float()
