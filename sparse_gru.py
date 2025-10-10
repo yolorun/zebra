@@ -99,26 +99,31 @@ class SparseGRUBrain(nn.Module):
     def _sparse_matmul(self, values, input_tensor):
         """
         Efficient sparse matrix multiplication with float32 weights.
-        Casts input to float32 to match weight dtype, then casts back.
+        Forces float32 computation by disabling autocast for this operation.
         """
-        # Cast input to float32 to match sparse weight dtype
+        # Store original dtype for casting back
         original_dtype = input_tensor.dtype
-        input_fp32 = input_tensor.float()
         
-        # Create COO sparse tensor (values already float32)
-        W = torch.sparse_coo_tensor(
-            self.W_indices,
-            values,
-            self.sparse_shape,
-            dtype=torch.float32,
-            device=input_tensor.device
-        )
-        W = W.coalesce()
+        # Disable autocast and force float32 for sparse operations
+        with torch.cuda.amp.autocast(enabled=False):
+            # Cast to float32
+            input_fp32 = input_tensor.float()
+            values_fp32 = values.float()
+            
+            # Create COO sparse tensor in float32
+            W = torch.sparse_coo_tensor(
+                self.W_indices,
+                values_fp32,
+                self.sparse_shape,
+                dtype=torch.float32,
+                device=input_tensor.device
+            )
+            W = W.coalesce()
 
-        # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
-        output = torch.sparse.mm(W, input_fp32.T).T
+            # Sparse matmul in float32
+            output = torch.sparse.mm(W, input_fp32.T).T
         
-        # Cast back to original dtype
+        # Cast back to original dtype after leaving the no-autocast context
         if original_dtype != torch.float32:
             output = output.to(original_dtype)
 
