@@ -29,10 +29,10 @@ class SparseGRUBrain(nn.Module):
         self.register_buffer('W_indices', self._build_sparse_indices(edge_list, N, H))
         num_edges = len(edge_list)
 
-        # Sparse input weights (calcium -> hidden) for each gate
-        self.W_z_values = nn.Parameter(torch.randn(num_edges * H) * 0.01)
-        self.W_r_values = nn.Parameter(torch.randn(num_edges * H) * 0.01)
-        self.W_h_values = nn.Parameter(torch.randn(num_edges * H) * 0.01)
+        # Sparse input weights (calcium -> hidden) for each gate - keep in float32
+        self.W_z_values = nn.Parameter(torch.randn(num_edges * H, dtype=torch.float32) * 0.01)
+        self.W_r_values = nn.Parameter(torch.randn(num_edges * H, dtype=torch.float32) * 0.01)
+        self.W_h_values = nn.Parameter(torch.randn(num_edges * H, dtype=torch.float32) * 0.01)
 
         # Dense batched recurrent weights (hidden -> hidden) for each neuron
         self.U_z = nn.Parameter(torch.randn(N, H, H) * 0.01)
@@ -62,7 +62,7 @@ class SparseGRUBrain(nn.Module):
         # Pre-build sparse tensor shapes for efficiency
         self.sparse_shape = (N * H, N)
 
-        self._build_csr_template()
+        # self._build_csr_template()
 
     def _build_sparse_indices(self, edge_list, N, H):
         """
@@ -79,40 +79,48 @@ class SparseGRUBrain(nn.Module):
 
         return torch.LongTensor(indices).T  # Shape: (2, num_edges * H)
 
-    def _build_csr_template(self):
-        """Build CSR template structure once to avoid repeated conversions."""
-        # Create a dummy COO tensor with ones
-        dummy_values = torch.ones(self.W_indices.shape[1])
-        W_coo = torch.sparse_coo_tensor(
-            self.W_indices,
-            dummy_values,
-            self.sparse_shape
-        ).coalesce()
+    # def _build_csr_template(self):
+    #     """Build CSR template structure once to avoid repeated conversions."""
+    #     # Create a dummy COO tensor with ones
+    #     dummy_values = torch.ones(self.W_indices.shape[1])
+    #     W_coo = torch.sparse_coo_tensor(
+    #         self.W_indices,
+    #         dummy_values,
+    #         self.sparse_shape
+    #     ).coalesce()
         
-        # Convert to CSR and store the structure
-        W_csr = W_coo.to_sparse_csr()
+    #     # Convert to CSR and store the structure
+    #     W_csr = W_coo.to_sparse_csr()
         
-        # Store CSR indices (these don't change, only values do)
-        self.register_buffer('csr_crow_indices', W_csr.crow_indices())
-        self.register_buffer('csr_col_indices', W_csr.col_indices())
+    #     # Store CSR indices (these don't change, only values do)
+    #     self.register_buffer('csr_crow_indices', W_csr.crow_indices())
+    #     self.register_buffer('csr_col_indices', W_csr.col_indices())
 
     def _sparse_matmul(self, values, input_tensor):
         """
-        Efficient sparse matrix multiplication using pre-built CSR structure.
-        No conversion overhead - just update values.
+        Efficient sparse matrix multiplication with float32 weights.
+        Casts input to float32 to match weight dtype, then casts back.
         """
-        # Create CSR tensor directly using pre-computed structure
-        W_csr = torch.sparse_csr_tensor(
-            self.csr_crow_indices,
-            self.csr_col_indices,
+        # Cast input to float32 to match sparse weight dtype
+        original_dtype = input_tensor.dtype
+        input_fp32 = input_tensor.float()
+        
+        # Create COO sparse tensor (values already float32)
+        W = torch.sparse_coo_tensor(
+            self.W_indices,
             values,
-            size=self.sparse_shape,
-            dtype=input_tensor.dtype,
+            self.sparse_shape,
+            dtype=torch.float32,
             device=input_tensor.device
         )
+        W = W.coalesce()
 
         # Sparse matmul: (N*H, N) @ (N, B) -> (N*H, B)
-        output = (W_csr @ input_tensor.T).T
+        output = torch.sparse.mm(W, input_fp32.T).T
+        
+        # Cast back to original dtype
+        if original_dtype != torch.float32:
+            output = output.to(original_dtype)
 
         # Reshape to (B, N, H)
         B = input_tensor.shape[0]
