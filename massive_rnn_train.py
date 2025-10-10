@@ -518,6 +518,7 @@ def main():
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Train Massive RNN on calcium traces')
     parser.add_argument('--params', nargs='*', default=[], help='Override cfg params: key1=value1 key2=value2')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
     args = parser.parse_args()
     
     # Configuration
@@ -549,7 +550,7 @@ def main():
         'accumulate_grad_batches': 16,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
         'learning_rate': 1e-3,  # Initial learning rate
         'weight_decay': 1e-5,  # L2 regularization
-        'max_epochs': 50,  # Maximum training epochs
+        'max_epochs': 10,  # Maximum training epochs
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
@@ -643,6 +644,7 @@ def main():
         log_every_n_steps=cfg['log_every_n_steps'],
         enable_progress_bar=True,
         enable_model_summary=False,
+        val_check_interval=0.2,
     )
     
     # Print training configuration
@@ -656,8 +658,11 @@ def main():
     print(f"  Hidden dimension: {cfg['hidden_dim']}")
     
     # Train the model
-    print("\nStarting training...")
-    trainer.fit(model, data_module)
+    if args.resume:
+        print(f"\nResuming training from checkpoint: {args.resume}")
+    else:
+        print("\nStarting training...")
+    trainer.fit(model, data_module, ckpt_path=args.resume)
     
     # Final evaluation
     print("Running final validation...")
