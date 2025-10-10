@@ -455,33 +455,38 @@ class MassiveRNNModule(pl.LightningModule):
         
         # Learning rate scheduler
         scheduler_type = self.hparams.get('scheduler_type', 'cosine')
+        lr_interval = self.hparams.get('lr_interval', 'step')
         
         if scheduler_type == 'cosine':
-            warmup_epochs = self.hparams.get('warmup_epochs', 0)
+            # Get total training steps from trainer
+            total_steps = self.trainer.estimated_stepping_batches
+            warmup_steps = self.hparams.get('warmup_steps', 0)
             
-            if warmup_epochs > 0:
+            print(f"LR Scheduler: total_steps={total_steps}, warmup_steps={warmup_steps}, interval={lr_interval}")
+            
+            if warmup_steps > 0:
                 # Cosine annealing with warmup using SequentialLR
                 warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
                     optimizer,
                     start_factor=0.01,  # Start at 1% of base LR
                     end_factor=1.0,     # Reach 100% of base LR
-                    total_iters=warmup_epochs
+                    total_iters=warmup_steps
                 )
                 cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
-                    T_max=self.hparams.max_epochs - warmup_epochs,
+                    T_max=total_steps - warmup_steps,
                     eta_min=self.hparams.get('min_lr', 1e-6)
                 )
                 scheduler = torch.optim.lr_scheduler.SequentialLR(
                     optimizer,
                     schedulers=[warmup_scheduler, cosine_scheduler],
-                    milestones=[warmup_epochs]
+                    milestones=[warmup_steps]
                 )
             else:
                 # Standard cosine annealing without warmup
                 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                     optimizer,
-                    T_max=self.hparams.max_epochs,
+                    T_max=total_steps,
                     eta_min=self.hparams.get('min_lr', 1e-6)
                 )
             
@@ -489,7 +494,7 @@ class MassiveRNNModule(pl.LightningModule):
                 'optimizer': optimizer,
                 'lr_scheduler': {
                     'scheduler': scheduler,
-                    'interval': 'epoch'
+                    'interval': lr_interval
                 }
             }
         elif scheduler_type == 'reduce_on_plateau':
@@ -550,15 +555,16 @@ def main():
         'accumulate_grad_batches': 16,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
         'learning_rate': 1e-3,  # Initial learning rate
         'weight_decay': 1e-5,  # L2 regularization
-        'max_epochs': 10,  # Maximum training epochs
+        'max_epochs': 3,  # Maximum training epochs
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
         'use_gradient_checkpointing': True,  # Trade compute for memory (40-50% VRAM savings)
         'bptt_chunk_size': 8,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
         'scheduler_type': 'cosine',  # 'cosine' or 'reduce_on_plateau'
-        'warmup_epochs': 1,  # Number of warmup epochs (0 for no warmup)
+        'warmup_steps': 500,  # Number of warmup steps (0 for no warmup)
         'min_lr': 1e-6,  # Minimum learning rate
+        'lr_interval': 'step',  # 'step' or 'epoch' - how often to update LR
         
         # Hardware and performance
         'accelerator': 'gpu',  # 'gpu' or 'cpu'
