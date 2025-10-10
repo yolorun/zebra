@@ -128,18 +128,22 @@ def set_seed(seed):
 class CalciumTracesDataset(Dataset):
     """Dataset for calcium traces with stimulus."""
     
-    def __init__(self, traces, stimulus, sequence_length, prediction_horizon=1):
+    def __init__(self, traces, stimulus, sequence_length, prediction_horizon=1, noise_std=0.0, apply_clip=True):
         """
         Args:
             traces: (n_timesteps, n_neurons) array of calcium traces
             stimulus: (n_timesteps, stimulus_dim) array of stimulus data
             sequence_length: length of input sequences
             prediction_horizon: how many steps ahead to predict (default 1)
+            noise_std: standard deviation of Gaussian noise to add (default 0.0)
+            apply_clip: whether to clip to non-negative values (default True)
         """
         self.traces = torch.from_numpy(traces).float()
         self.stimulus = torch.from_numpy(stimulus).float()
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
+        self.noise_std = noise_std
+        self.apply_clip = apply_clip
         
         self.n_timesteps, self.n_neurons = self.traces.shape
         self.n_samples = self.n_timesteps - sequence_length - prediction_horizon + 1
@@ -159,6 +163,16 @@ class CalciumTracesDataset(Dataset):
         calcium_seq = self.traces[start_idx:end_idx, :]  # (seq_len, n_neurons)
         stimulus_seq = self.stimulus[start_idx:end_idx, :]  # (seq_len, stimulus_dim)
         target = self.traces[target_idx, :]  # (n_neurons,)
+        
+        # Add noise if specified
+        if self.noise_std > 0:
+            calcium_seq = calcium_seq + torch.randn_like(calcium_seq) * self.noise_std
+            # target = target + torch.randn_like(target) * self.noise_std
+        
+        # Clip to non-negative values if specified
+        if self.apply_clip:
+            calcium_seq = torch.clamp(calcium_seq, min=0)
+            target = torch.clamp(target, min=0)
         
         return calcium_seq, stimulus_seq, target
 
@@ -225,11 +239,6 @@ class CalciumDataModule(pl.LightningDataModule):
             traces = zscore(traces, axis=0)
             traces = np.nan_to_num(traces)
         
-        # Clip to non-negative values if specified
-        if self.cfg.get('nonzero_calc', True):
-            print("Clipping traces to non-negative values...")
-            traces = np.clip(traces, 0, None)
-        
         # Load and resample stimulus data
         print(f"Loading stimulus from {self.cfg['stimulus_path']}...")
         raw_stimulus = np.fromfile(self.cfg['stimulus_path'], dtype=np.float32).reshape(-1, 10)
@@ -262,13 +271,18 @@ class CalciumDataModule(pl.LightningDataModule):
         val_stimulus = stimulus[split_idx:, :]
         
         # Create datasets
+        # Train dataset gets noise, validation doesn't
         self.train_dataset = CalciumTracesDataset(
             train_traces, train_stimulus,
-            self.cfg['sequence_length'], self.cfg['prediction_horizon']
+            self.cfg['sequence_length'], self.cfg['prediction_horizon'],
+            noise_std=self.cfg.get('noise_std', 0.0),
+            apply_clip=self.cfg.get('nonzero_calc', True)
         )
         self.val_dataset = CalciumTracesDataset(
             val_traces, val_stimulus,
-            self.cfg['sequence_length'], self.cfg['prediction_horizon']
+            self.cfg['sequence_length'], self.cfg['prediction_horizon'],
+            noise_std=0.0,  # No noise for validation
+            apply_clip=self.cfg.get('nonzero_calc', True)
         )
         
         print(f"Train samples: {len(self.train_dataset)}, Val samples: {len(self.val_dataset)}")
@@ -541,6 +555,7 @@ def main():
         'prediction_horizon': 1,  # How many steps ahead to predict
         'train_val_split': 0.9,  # Train/validation split ratio
         'normalize_traces': False,  # Whether to z-score normalize traces
+        'noise_std': 0.08,  # Standard deviation of Gaussian noise to add to traces
         'nonzero_calc': True,  # Clip calcium traces to non-negative values
         
         # Model parameters
