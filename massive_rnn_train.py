@@ -355,9 +355,16 @@ class MassiveRNNModule(pl.LightningModule):
         # Initialize hidden state
         hidden = self.model.init_hidden(batch_size, device=self.device)
         
-        # Teacher forcing training
-        total_loss = 0
+        # Get BPTT chunk size
+        bptt_chunk_size = self.hparams.get('bptt_chunk_size', 0)
+        
+        # Teacher forcing training with optional BPTT
+        losses = []
         for t in range(seq_len - 1):
+            # Truncated BPTT: detach hidden state periodically
+            if bptt_chunk_size > 0 and t > 0 and t % bptt_chunk_size == 0:
+                hidden = hidden.detach()
+            
             calcium_t = calcium_seq[:, t, :]
             stimulus_t = stimulus_seq[:, t, :]
             target_t = calcium_seq[:, t + 1, :]  # Next timestep
@@ -371,12 +378,12 @@ class MassiveRNNModule(pl.LightningModule):
             else:
                 calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
             
-            # Compute loss
+            # Compute loss and store
             loss = self.mse_loss(calcium_pred, target_t)
-            total_loss += loss
+            losses.append(loss)
         
         # Average loss over sequence
-        avg_loss = total_loss / (seq_len - 1)
+        avg_loss = torch.stack(losses).mean()
         
         # Logging
         self.log('train_loss', avg_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -391,16 +398,16 @@ class MassiveRNNModule(pl.LightningModule):
         hidden = self.model.init_hidden(batch_size, device=self.device)
         
         # Teacher forcing evaluation
-        teacher_forcing_loss = 0
+        tf_losses = []
         for t in range(seq_len - 1):
             calcium_t = calcium_seq[:, t, :]
             stimulus_t = stimulus_seq[:, t, :]
             target_t = calcium_seq[:, t + 1, :]
             
             calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
-            teacher_forcing_loss += self.mse_loss(calcium_pred, target_t)
+            tf_losses.append(self.mse_loss(calcium_pred, target_t))
         
-        avg_tf_loss = teacher_forcing_loss / (seq_len - 1)
+        avg_tf_loss = torch.stack(tf_losses).mean()
         
         # Autoregressive evaluation (predict multiple steps ahead)
         if self.autoregressive_steps > 1 and seq_len > self.autoregressive_steps:
@@ -547,6 +554,7 @@ def main():
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
         'use_gradient_checkpointing': True,  # Trade compute for memory (40-50% VRAM savings)
+        'bptt_chunk_size': 8,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
         'scheduler_type': 'cosine',  # 'cosine' or 'reduce_on_plateau'
         'warmup_epochs': 1,  # Number of warmup epochs (0 for no warmup)
         'min_lr': 1e-6,  # Minimum learning rate
