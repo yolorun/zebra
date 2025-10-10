@@ -60,6 +60,7 @@ from scipy.stats import zscore
 from tqdm import tqdm
 import wandb
 import argparse
+from pprint import pprint
 
 import bitsandbytes as bnb
 
@@ -568,6 +569,8 @@ def main():
         overrides = parse_params(args.params, cfg)
         print(f"Overriding cfg with: {overrides}")
         cfg.update(overrides)
+    
+    pprint(cfg)
     
     # Set random seed
     set_seed(cfg['seed'])
