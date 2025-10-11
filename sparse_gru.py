@@ -32,7 +32,7 @@ class ChunkedEinsum(torch.autograd.Function):
                                        grad_output[:, i:j])
             grad_hidden[:, i:j] = torch.einsum('bni,nhi->bnh',
                                                grad_output[:, i:j],
-                                               U[i:j].transpose(-2, -1))
+                                               U[i:j])
         
         return grad_hidden, grad_U
 
