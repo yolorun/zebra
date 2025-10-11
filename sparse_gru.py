@@ -3,6 +3,40 @@ import torch.nn as nn
 import torch.sparse
 
 
+class ChunkedEinsum(torch.autograd.Function):
+    """
+    Memory-efficient einsum that processes neurons in chunks during backward pass.
+    This prevents OOM errors when training with large numbers of neurons.
+    """
+    @staticmethod
+    def forward(ctx, hidden, U):
+        ctx.save_for_backward(hidden, U)
+        # Forward pass uses standard einsum - no change
+        return torch.einsum('bnh,nhi->bni', hidden, U)
+    
+    @staticmethod
+    def backward(ctx, grad_output):
+        hidden, U = ctx.saved_tensors
+        B, N, H = hidden.shape
+        
+        # Process in chunks to limit memory usage
+        chunk_size = 5000  # Adjust if needed based on available memory
+        grad_hidden = torch.zeros_like(hidden)
+        grad_U = torch.zeros_like(U)
+        
+        for i in range(0, N, chunk_size):
+            j = min(i + chunk_size, N)
+            # Compute gradients for this chunk only
+            grad_U[i:j] = torch.einsum('bnh,bni->nhi', 
+                                       hidden[:, i:j], 
+                                       grad_output[:, i:j])
+            grad_hidden[:, i:j] = torch.einsum('bni,nhi->bnh',
+                                               grad_output[:, i:j],
+                                               U[i:j].transpose(-2, -1))
+        
+        return grad_hidden, grad_U
+
+
 class SparseGRUBrain(nn.Module):
     """
     Efficiently trains 70k GRU models in parallel with sparse connectivity.
@@ -198,8 +232,9 @@ class SparseGRUBrain(nn.Module):
         # Dense recurrent transforms (batched matrix multiply)
         # Each neuron has its own weight matrix U[n], so we use einsum for correct indexing
         # hidden: (B, N, H), U_z: (N, H, H) -> rec_z: (B, N, H)
-        rec_z = torch.einsum('bnh,nhi->bni', hidden, self.U_z)
-        rec_r = torch.einsum('bnh,nhi->bni', hidden, self.U_r)
+        # Using ChunkedEinsum to prevent OOM during backward pass
+        rec_z = ChunkedEinsum.apply(hidden, self.U_z)
+        rec_r = ChunkedEinsum.apply(hidden, self.U_r)
 
         # GRU gate computations
         if self.b_z is not None:
@@ -211,7 +246,8 @@ class SparseGRUBrain(nn.Module):
 
         # Candidate hidden state
         # Apply reset gate then recurrent transform
-        rec_h = torch.einsum('bnh,nhi->bni', r * hidden, self.U_h)
+        # Using ChunkedEinsum to prevent OOM during backward pass
+        rec_h = ChunkedEinsum.apply(r * hidden, self.U_h)
 
         if self.b_h is not None:
             h_tilde = torch.tanh(inp_h + rec_h + self.b_h.unsqueeze(0))
