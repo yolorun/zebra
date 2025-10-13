@@ -624,7 +624,7 @@ def main():
         project=cfg['project_name'],
         name=cfg['experiment_name'],
         config=cfg,
-        log_model='all'
+        log_model=False
     )
     
     # Setup callbacks
