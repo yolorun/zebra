@@ -62,6 +62,7 @@ from tqdm import tqdm
 import wandb
 import argparse
 from pprint import pprint
+from datetime import datetime
 
 import bitsandbytes as bnb
 
@@ -312,6 +313,7 @@ class MassiveRNNModule(pl.LightningModule):
     def __init__(self, cfg, connectivity_graph, num_neurons=None):
         super().__init__()
         self.save_hyperparameters(cfg)
+        self.save_hyperparameters({'num_neurons': num_neurons})
         self.num_neurons = num_neurons
         self.use_gradient_checkpointing = cfg.get('use_gradient_checkpointing', False)
         
@@ -444,6 +446,35 @@ class MassiveRNNModule(pl.LightningModule):
         self.log('val_mae', avg_mae, on_epoch=True, prog_bar=True, logger=True)
         
         return avg_tf_loss
+    
+    def infer(self, initial_calcium, initial_hidden, stimulus_seq, num_steps):
+        """
+        Autoregressively generate neuron activity for a given number of timesteps.
+        
+        Args:
+            initial_calcium: (batch_size, n_neurons) - Initial calcium values
+            initial_hidden: (batch_size, n_neurons, hidden_dim) - Initial hidden state
+            stimulus_seq: (batch_size, num_steps, stimulus_dim) - Stimulus sequence for all timesteps
+            num_steps: int - Number of timesteps to generate
+            
+        Returns:
+            predictions: (batch_size, num_steps, n_neurons) - Predicted calcium activity over time
+        """
+        batch_size = initial_calcium.shape[0]
+        n_neurons = initial_calcium.shape[1]
+        
+        predictions = torch.zeros(batch_size, num_steps, n_neurons, device=self.device)
+        current_calcium = initial_calcium
+        current_hidden = initial_hidden
+        
+        for t in range(num_steps):
+            stimulus_t = stimulus_seq[:, t, :] if stimulus_seq is not None else None
+            calcium_pred, hidden_new = self.model(current_calcium, current_hidden, stimulus_t)
+            predictions[:, t, :] = calcium_pred
+            current_calcium = calcium_pred
+            current_hidden = hidden_new
+        
+        return predictions
     
     def configure_optimizers(self):
         # Optimizer
@@ -627,9 +658,15 @@ def main():
         log_model=False
     )
     
+    # Create unique checkpoint directory with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    checkpoint_dir = f"massive-rnn_{timestamp}"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Checkpoints will be saved to: {checkpoint_dir}")
+    
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath=cfg['checkpoint_dir'],
+        dirpath=checkpoint_dir,
         filename='massive-rnn-{epoch:02d}-{val_loss:.4f}',
         save_top_k=3,
         monitor='val_loss',

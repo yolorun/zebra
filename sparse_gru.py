@@ -342,8 +342,11 @@ class SparseGRUBrain(nn.Module):
             for idx in range(num_neurons):
                 edge_list.add((idx, idx))
         
+        # Sort edge list for deterministic ordering (first by source, then by target)
+        edge_list = sorted(edge_list)
+        
         print(f"Creating SparseGRUBrain with {num_neurons} neurons and {len(edge_list)} connections")
-        return cls(num_neurons, hidden_dim, list(edge_list), stimulus_dim=stimulus_dim, bias=bias)
+        return cls(num_neurons, hidden_dim, edge_list, stimulus_dim=stimulus_dim, bias=bias)
 
 
 # Example usage
