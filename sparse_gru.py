@@ -3,38 +3,107 @@ import torch.nn as nn
 import torch.sparse
 
 
-class ChunkedEinsum(torch.autograd.Function):
+class SparseMatMul(torch.autograd.Function):
     """
-    Memory-efficient einsum that processes neurons in chunks during backward pass.
-    This prevents OOM errors when training with large numbers of neurons.
+    Custom autograd function for sparse matrix multiplication that maintains
+    sparsity during backward pass, preventing gradient densification.
+    
+    This dramatically reduces VRAM usage by computing gradients only at
+    sparse indices instead of materializing full dense gradient tensors.
     """
     @staticmethod
-    def forward(ctx, hidden, U):
-        ctx.save_for_backward(hidden, U)
-        # Forward pass uses standard einsum - no change
-        return torch.einsum('bnh,nhi->bni', hidden, U)
+    def forward(ctx, indices, values, input_tensor, sparse_shape):
+        """
+        Forward: W @ input.T where W is sparse
+        
+        Args:
+            indices: (2, num_edges) sparse indices
+            values: (num_edges,) sparse values
+            input_tensor: (B, N) dense input
+            sparse_shape: (N*H, N) shape of sparse matrix W
+        
+        Returns:
+            output: (B, N*H) result of sparse matmul
+        """
+        # Force float32 for sparse operations
+        with torch.amp.autocast('cuda', enabled=False):
+            input_fp32 = input_tensor.float()
+            values_fp32 = values.float()
+            
+            # Create sparse tensor and perform matmul
+            W = torch.sparse_coo_tensor(
+                indices,
+                values_fp32,
+                sparse_shape,
+                dtype=torch.float32,
+                device=input_tensor.device,
+                is_coalesced=True,
+            )  # .coalesce()
+            
+            output = torch.sparse.mm(W, input_fp32.T).T
+        
+        # Save for backward
+        ctx.save_for_backward(input_tensor, values)
+        ctx.indices = indices
+        ctx.sparse_shape = sparse_shape
+        ctx.original_dtype = input_tensor.dtype
+        
+        # Cast back to original dtype
+        if ctx.original_dtype != torch.float32:
+            output = output.to(ctx.original_dtype)
+        
+        return output
     
     @staticmethod
     def backward(ctx, grad_output):
-        hidden, U = ctx.saved_tensors
-        B, N, H = hidden.shape
+        """
+        Backward: Compute gradients only at sparse indices using einsum.
         
-        # Process in chunks to limit memory usage
-        chunk_size = 5000  # Adjust if needed based on available memory
-        grad_hidden = torch.zeros_like(hidden)
-        grad_U = torch.zeros_like(U)
+        This prevents densification by:
+        1. Computing grad_values only for existing sparse connections
+        2. Using indexed operations instead of full matrix multiplications
         
-        for i in range(0, N, chunk_size):
-            j = min(i + chunk_size, N)
-            # Compute gradients for this chunk only
-            grad_U[i:j] = torch.einsum('bnh,bni->nhi', 
-                                       hidden[:, i:j], 
-                                       grad_output[:, i:j])
-            grad_hidden[:, i:j] = torch.einsum('bni,nhi->bnh',
-                                               grad_output[:, i:j],
-                                               U[i:j])
+        Args:
+            grad_output: (B, N*H) gradient from downstream
         
-        return grad_hidden, grad_U
+        Returns:
+            (None, grad_values, grad_input, None)
+        """
+        input_tensor, values = ctx.saved_tensors
+        
+        # Work in float32
+        with torch.amp.autocast('cuda', enabled=False):
+            grad_output_fp32 = grad_output.float()
+            input_fp32 = input_tensor.float()
+            
+            # Extract indices
+            row_idx = ctx.indices[0]  # target indices (N*H dimension)
+            col_idx = ctx.indices[1]  # source indices (N dimension)
+            
+            # Gradient w.r.t. VALUES (sparse!) using einsum
+            # grad_values[e] = sum_b(grad_output[b, row[e]] * input[b, col[e]])
+            grad_output_selected = grad_output_fp32[:, row_idx]  # (B, num_edges)
+            input_selected = input_fp32[:, col_idx]              # (B, num_edges)
+            grad_values = torch.einsum('be,be->e', grad_output_selected, input_selected)
+            
+            # Gradient w.r.t. INPUT (reconstruct sparse W for backward pass)
+            W = torch.sparse_coo_tensor(
+                ctx.indices,
+                values.float(),
+                ctx.sparse_shape,
+                dtype=torch.float32,
+                device=input_tensor.device
+            ).coalesce()
+            
+            grad_input = torch.sparse.mm(W.t(), grad_output_fp32.T).T
+        
+        # Cast back to original dtype
+        if ctx.original_dtype != torch.float32:
+            grad_values = grad_values.to(ctx.original_dtype)
+            grad_input = grad_input.to(ctx.original_dtype)
+        
+        # Return gradients: (indices, values, input_tensor, sparse_shape)
+        return None, grad_values, grad_input, None
 
 
 class SparseGRUBrain(nn.Module):
@@ -43,7 +112,7 @@ class SparseGRUBrain(nn.Module):
     Each neuron has its own GRU with potentially different input connections.
     """
 
-    def __init__(self, num_neurons, hidden_dim, edge_list, stimulus_dim=0, bias=True):
+    def __init__(self, num_neurons, hidden_dim, edge_list, stimulus_dim=0, bias=True, shared_stim_proj=False):
         """
         Args:
             num_neurons: Number of neurons (70k in your case)
@@ -52,12 +121,14 @@ class SparseGRUBrain(nn.Module):
                       including self-connections if they exist
             stimulus_dim: Dimension of stimulus input (0 if no stimulus)
             bias: Whether to use bias terms in GRU gates
+            shared_stim_proj: If True, use single shared projection for stimulus (saves 67% params)
         """
         super().__init__()
         N, H = num_neurons, hidden_dim
         self.num_neurons = N
         self.hidden_dim = H
         self.stimulus_dim = stimulus_dim
+        self.shared_stim_proj = shared_stim_proj
 
         # Build sparse indices from edge list
         self.register_buffer('W_indices', self._build_sparse_indices(edge_list, N, H))
@@ -85,9 +156,14 @@ class SparseGRUBrain(nn.Module):
 
         # Stimulus projection layers (if stimulus is used)
         if stimulus_dim > 0:
-            self.stimulus_projection_z = nn.Linear(stimulus_dim, N * H)
-            self.stimulus_projection_r = nn.Linear(stimulus_dim, N * H)
-            self.stimulus_projection_h = nn.Linear(stimulus_dim, N * H)
+            if shared_stim_proj:
+                # Single shared projection for all gates (saves parameters)
+                self.stimulus_projection = nn.Linear(stimulus_dim, N * H)
+            else:
+                # Separate projection for each gate (more capacity)
+                self.stimulus_projection_z = nn.Linear(stimulus_dim, N * H)
+                self.stimulus_projection_r = nn.Linear(stimulus_dim, N * H)
+                self.stimulus_projection_h = nn.Linear(stimulus_dim, N * H)
         
         # Output projection: hidden -> predicted calcium (scalar per neuron)
         # self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)
@@ -113,89 +189,19 @@ class SparseGRUBrain(nn.Module):
 
         return torch.LongTensor(indices).T  # Shape: (2, num_edges * H)
 
-    # def _build_csr_template(self):
-    #     """Build CSR template structure once to avoid repeated conversions."""
-    #     # Create a dummy COO tensor with ones
-    #     dummy_values = torch.ones(self.W_indices.shape[1])
-    #     W_coo = torch.sparse_coo_tensor(
-    #         self.W_indices,
-    #         dummy_values,
-    #         self.sparse_shape
-    #     ).coalesce()
-        
-    #     # Convert to CSR and store the structure
-    #     W_csr = W_coo.to_sparse_csr()
-        
-    #     # Store CSR indices (these don't change, only values do)
-    #     self.register_buffer('csr_crow_indices', W_csr.crow_indices())
-    #     self.register_buffer('csr_col_indices', W_csr.col_indices())
-
-    # def _sparse_matmul(self, values, input_tensor):
-    #     """
-    #     Efficient sparse matrix multiplication with float32 weights.
-    #     Forces float32 computation by disabling autocast for this operation.
-    #     """
-    #     # Store original dtype for casting back
-    #     original_dtype = input_tensor.dtype
-        
-    #     # Disable autocast and force float32 for sparse operations
-    #     with torch.cuda.amp.autocast(enabled=False):
-    #         # Cast to float32
-    #         input_fp32 = input_tensor.float()
-    #         values_fp32 = values.float()
-            
-    #         # Create COO sparse tensor in float32
-    #         W = torch.sparse_coo_tensor(
-    #             self.W_indices,
-    #             values_fp32,
-    #             self.sparse_shape,
-    #             dtype=torch.float32,
-    #             device=input_tensor.device
-    #         )
-    #         W = W.coalesce()
-
-    #         # Sparse matmul in float32
-    #         output = torch.sparse.mm(W, input_fp32.T).T
-        
-    #     # Cast back to original dtype after leaving the no-autocast context
-    #     if original_dtype != torch.float32:
-    #         output = output.to(original_dtype)
-
-    #     # Reshape to (B, N, H)
-    #     B = input_tensor.shape[0]
-    #     return output.reshape(B, self.num_neurons, self.hidden_dim)
-
     def _sparse_matmul(self, values, input_tensor):
         """
-        Efficient sparse matrix multiplication with float32 weights.
-        Forces float32 computation by disabling autocast for this operation.
+        Sparse matrix multiplication using custom autograd function.
+        Maintains sparsity during backward pass to reduce VRAM usage.
         """
-        # Store original dtype for casting back
-        original_dtype = input_tensor.dtype
+        # Use custom function with sparse-aware backward
+        output = SparseMatMul.apply(
+            self.W_indices,
+            values,
+            input_tensor,
+            self.sparse_shape
+        )
         
-        # Disable autocast and force float32 for sparse operations
-        with torch.amp.autocast('cuda', enabled=False):
-            # Cast to float32
-            input_fp32 = input_tensor.float()
-            values_fp32 = values.float()
-            
-            # Create COO sparse tensor in float32
-            W = torch.sparse_coo_tensor(
-                self.W_indices,
-                values_fp32,
-                self.sparse_shape,
-                dtype=torch.float32,
-                device=input_tensor.device
-            )
-            W = W.coalesce()
-
-            # Sparse matmul in float32
-            output = torch.sparse.mm(W, input_fp32.T).T
-        
-        # Cast back to original dtype after leaving the no-autocast context
-        if original_dtype != torch.float32:
-            output = output.to(original_dtype)
-
         # Reshape to (B, N, H)
         B = input_tensor.shape[0]
         return output.reshape(B, self.num_neurons, self.hidden_dim)
@@ -222,19 +228,26 @@ class SparseGRUBrain(nn.Module):
         
         # Add stimulus contribution if provided
         if stimulus_t is not None and self.stimulus_dim > 0:
-            stim_z = self.stimulus_projection_z(stimulus_t).view(B, N, self.hidden_dim)
-            stim_r = self.stimulus_projection_r(stimulus_t).view(B, N, self.hidden_dim)
-            stim_h = self.stimulus_projection_h(stimulus_t).view(B, N, self.hidden_dim)
-            inp_z = inp_z + stim_z
-            inp_r = inp_r + stim_r
-            inp_h = inp_h + stim_h
+            if self.shared_stim_proj:
+                # Shared projection for all gates
+                stim_proj = self.stimulus_projection(stimulus_t).view(B, N, self.hidden_dim)
+                inp_z = inp_z + stim_proj
+                inp_r = inp_r + stim_proj
+                inp_h = inp_h + stim_proj
+            else:
+                # Separate projections per gate
+                stim_z = self.stimulus_projection_z(stimulus_t).view(B, N, self.hidden_dim)
+                stim_r = self.stimulus_projection_r(stimulus_t).view(B, N, self.hidden_dim)
+                stim_h = self.stimulus_projection_h(stimulus_t).view(B, N, self.hidden_dim)
+                inp_z = inp_z + stim_z
+                inp_r = inp_r + stim_r
+                inp_h = inp_h + stim_h
 
         # Dense recurrent transforms (batched matrix multiply)
         # Each neuron has its own weight matrix U[n], so we use einsum for correct indexing
         # hidden: (B, N, H), U_z: (N, H, H) -> rec_z: (B, N, H)
-        # Using ChunkedEinsum to prevent OOM during backward pass
-        rec_z = ChunkedEinsum.apply(hidden, self.U_z)
-        rec_r = ChunkedEinsum.apply(hidden, self.U_r)
+        rec_z = torch.einsum('bnh,nhi->bni', hidden, self.U_z)
+        rec_r = torch.einsum('bnh,nhi->bni', hidden, self.U_r)
 
         # GRU gate computations
         if self.b_z is not None:
@@ -246,8 +259,7 @@ class SparseGRUBrain(nn.Module):
 
         # Candidate hidden state
         # Apply reset gate then recurrent transform
-        # Using ChunkedEinsum to prevent OOM during backward pass
-        rec_h = ChunkedEinsum.apply(r * hidden, self.U_h)
+        rec_h = torch.einsum('bnh,nhi->bni', r * hidden, self.U_h)
 
         if self.b_h is not None:
             h_tilde = torch.tanh(inp_h + rec_h + self.b_h.unsqueeze(0))
@@ -275,7 +287,7 @@ class SparseGRUBrain(nn.Module):
     @classmethod
     def from_connectivity_graph(cls, connectivity_graph, hidden_dim, stimulus_dim=0, 
                                 include_self_connections=True, min_strength=0.0, bias=True,
-                                num_neurons=None, assume_zero_indexed=False):
+                                num_neurons=None, assume_zero_indexed=False, shared_stim_proj=False):
         """
         Create SparseGRUBrain from connectivity graph dict.
         
@@ -288,6 +300,7 @@ class SparseGRUBrain(nn.Module):
             bias: Whether to use bias terms
             num_neurons: Total number of neurons (if None, inferred from graph)
             assume_zero_indexed: If True, assumes neuron IDs are 0-indexed, otherwise 1-indexed
+            shared_stim_proj: If True, use single shared stimulus projection (saves 67% params)
         
         Returns:
             SparseGRUBrain instance
@@ -346,7 +359,7 @@ class SparseGRUBrain(nn.Module):
         edge_list = sorted(edge_list)
         
         print(f"Creating SparseGRUBrain with {num_neurons} neurons and {len(edge_list)} connections")
-        return cls(num_neurons, hidden_dim, edge_list, stimulus_dim=stimulus_dim, bias=bias)
+        return cls(num_neurons, hidden_dim, edge_list, stimulus_dim=stimulus_dim, bias=bias, shared_stim_proj=shared_stim_proj)
 
 
 # Example usage

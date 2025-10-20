@@ -4,6 +4,13 @@ Massive RNN Inference Script
 Loads a trained model, generates inference sequences, and evaluates performance.
 """
 
+import os
+os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+os.environ['OPENCV_IO_ENABLE_OPENEXR'] = '0'
+
+import matplotlib
+matplotlib.use('Agg')
+
 import torch
 import numpy as np
 import tensorstore as ts
@@ -14,7 +21,8 @@ from matplotlib.gridspec import GridSpec
 from scipy.stats import zscore
 import argparse
 from tqdm import tqdm
-import os
+import subprocess
+import cv2
 
 from massive_rnn_train import MassiveRNNModule
 from sparse_gru import SparseGRUBrain
@@ -46,6 +54,7 @@ def load_model_and_data(checkpoint_path, override_cfg):
     print(f"Loading model...")
     model = MassiveRNNModule.load_from_checkpoint(
         checkpoint_path,
+        cfg=training_cfg,
         connectivity_graph=connectivity_graph,
         num_neurons=num_neurons
     )
@@ -292,92 +301,124 @@ def plot_per_neuron_error_distribution(per_neuron_mse, per_neuron_mae, output_di
     print(f"Saved per-neuron error distribution to {output_dir}/per_neuron_error_distribution.png")
 
 
-def create_activity_projection(activity, segmentation, positions, max_neurons):
-    """Project 3D neuron activity onto 2D X-Y plane."""
-    seg_2d = np.max(segmentation, axis=0)
+def create_activity_projection(activity, seg_2d, max_neurons):
+    """Project neuron activity onto 2D X-Y plane using pre-computed segmentation."""
     activity_image = np.zeros_like(seg_2d, dtype=np.float32)
     
-    unique_labels = np.unique(seg_2d)
-    unique_labels = unique_labels[unique_labels != 0]
+    seg_2d_clipped = seg_2d.copy()
+    if max_neurons is not None:
+        seg_2d_clipped[seg_2d > max_neurons] = 0
     
-    for neuron_id in unique_labels:
-        if neuron_id > max_neurons:
-            continue
-        
-        neuron_idx = neuron_id - 1
-        if neuron_idx >= len(activity):
-            continue
-        
-        activity_val = activity[neuron_idx]
-        mask = seg_2d == neuron_id
-        activity_image[mask] = activity_val
+    valid_mask = (seg_2d_clipped > 0) & (seg_2d_clipped <= len(activity))
+    valid_indices = seg_2d_clipped[valid_mask] - 1
+    activity_image[valid_mask] = activity[valid_indices]
     
     return activity_image
 
 
-def create_activity_video(ground_truth, predictions, segmentation, positions, max_neurons, output_dir, fps=10):
-    """Create side-by-side video of ground truth and predicted activity."""
-    print("Creating activity videos...")
+def save_activity_frames(ground_truth, predictions, segmentation, positions, max_neurons, output_dir):
+    """Save individual activity frames as images."""
+    print("Generating activity frames...")
     predictions_np = predictions.cpu().numpy().squeeze(0)
     num_steps = ground_truth.shape[0]
-    
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
-    
+
+    # Create nested folder structure
+    frames_dir = os.path.join(output_dir, 'frames')
+    gt_dir = os.path.join(frames_dir, 'ground_truth')
+    pred_dir = os.path.join(frames_dir, 'predicted')
+    diff_dir = os.path.join(frames_dir, 'difference')
+    combined_dir = os.path.join(frames_dir, 'combined')
+
+    for dir_path in [frames_dir, gt_dir, pred_dir, diff_dir, combined_dir]:
+        os.makedirs(dir_path, exist_ok=True)
+
+    # Pre-compute 2D segmentation projection once
+    seg_2d = np.max(segmentation, axis=2)
+
+    # Calculate global min/max directly from traces for consistent scaling
     vmin = min(ground_truth.min(), predictions_np.min())
     vmax = max(ground_truth.max(), predictions_np.max())
-    
-    frames = []
-    for t in tqdm(range(num_steps), desc="Generating frames"):
-        gt_frame = create_activity_projection(ground_truth[t], segmentation, positions, max_neurons)
-        pred_frame = create_activity_projection(predictions_np[t], segmentation, positions, max_neurons)
+
+    # Calculate difference range directly from traces
+    diff_vmax = max(abs(ground_truth.min() - predictions_np.min()), 
+                    abs(ground_truth.max() - predictions_np.max()))
+
+    # Generate and save frames
+    for t in tqdm(range(num_steps), desc="Saving frames"):
+        gt_frame = create_activity_projection(ground_truth[t], seg_2d, max_neurons)
+        pred_frame = create_activity_projection(predictions_np[t], seg_2d, max_neurons)
         diff_frame = gt_frame - pred_frame
-        
-        ax1.clear()
-        ax2.clear()
-        ax3.clear()
-        
-        im1 = ax1.imshow(gt_frame, cmap='hot', vmin=vmin, vmax=vmax)
-        ax1.set_title(f'Ground Truth (t={t})')
-        ax1.axis('off')
-        
-        im2 = ax2.imshow(pred_frame, cmap='hot', vmin=vmin, vmax=vmax)
-        ax2.set_title(f'Predicted (t={t})')
-        ax2.axis('off')
-        
-        diff_vmax = max(abs(diff_frame.min()), abs(diff_frame.max()))
-        im3 = ax3.imshow(diff_frame, cmap='seismic', vmin=-diff_vmax, vmax=diff_vmax)
-        ax3.set_title(f'Difference (t={t})')
-        ax3.axis('off')
-        
-        if t == 0:
-            plt.colorbar(im1, ax=ax1, fraction=0.046)
-            plt.colorbar(im2, ax=ax2, fraction=0.046)
-            plt.colorbar(im3, ax=ax3, fraction=0.046)
-        
-        fig.canvas.draw()
-        frame = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-        frame = frame.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        frames.append(frame)
-    
-    print(f"Saving video with {len(frames)} frames...")
-    
-    Writer = animation.writers['pillow']
-    writer = Writer(fps=fps, bitrate=1800)
-    
-    anim_fig = plt.figure(figsize=(18, 6))
-    im = plt.imshow(frames[0])
-    plt.axis('off')
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        return [im]
-    
-    anim = animation.FuncAnimation(anim_fig, update, frames=len(frames), interval=1000/fps, blit=True)
-    anim.save(f'{output_dir}/activity_comparison.gif', writer=writer)
-    plt.close(anim_fig)
-    plt.close(fig)
-    
-    print(f"Saved activity video to {output_dir}/activity_comparison.gif")
+
+        # Normalize frames to 0-255 range for saving
+        gt_normalized = ((gt_frame - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+        pred_normalized = ((pred_frame - vmin) / (vmax - vmin) * 255).astype(np.uint8)
+        diff_normalized = ((diff_frame + diff_vmax) / (2 * diff_vmax) * 255).astype(np.uint8)
+
+        # Apply colormaps
+        gt_colored = cv2.applyColorMap(gt_normalized, cv2.COLORMAP_HOT)
+        pred_colored = cv2.applyColorMap(pred_normalized, cv2.COLORMAP_HOT)
+        diff_colored = cv2.applyColorMap(diff_normalized, cv2.COLORMAP_JET)
+
+        # Save individual frames
+        cv2.imwrite(os.path.join(gt_dir, f'frame_{t:04d}.png'), gt_colored)
+        cv2.imwrite(os.path.join(pred_dir, f'frame_{t:04d}.png'), pred_colored)
+        cv2.imwrite(os.path.join(diff_dir, f'frame_{t:04d}.png'), diff_colored)
+
+        # Create combined frame (horizontal concatenation)
+        separator = np.ones((gt_colored.shape[0], 5, 3), dtype=np.uint8) * 255  # White separator
+        combined_frame = np.hstack([gt_colored, separator, pred_colored, separator, diff_colored])
+        cv2.imwrite(os.path.join(combined_dir, f'frame_{t:04d}.png'), combined_frame)
+
+    print(f"Saved {num_steps} frames to {frames_dir}/")
+    return frames_dir
+
+
+def create_video_from_frames(frames_dir, output_dir, fps=10):
+    """Create videos from saved frames using ffmpeg."""
+    print("Creating videos with ffmpeg...")
+
+    # Video output paths
+    gt_video = os.path.join(output_dir, 'ground_truth.mp4')
+    pred_video = os.path.join(output_dir, 'predicted.mp4')
+    diff_video = os.path.join(output_dir, 'difference.mp4')
+    combined_video = os.path.join(output_dir, 'combined.mp4')
+
+    # ffmpeg commands
+    videos_to_create = [
+        (os.path.join(frames_dir, 'ground_truth', 'frame_%04d.png'), gt_video),
+        (os.path.join(frames_dir, 'predicted', 'frame_%04d.png'), pred_video),
+        (os.path.join(frames_dir, 'difference', 'frame_%04d.png'), diff_video),
+        (os.path.join(frames_dir, 'combined', 'frame_%04d.png'), combined_video)
+    ]
+
+    for input_pattern, output_path in videos_to_create:
+        cmd = [
+            'ffmpeg', '-y',  # -y to overwrite existing files
+            '-r', str(fps),
+            '-i', input_pattern,
+            '-c:v', 'libx264',
+            '-pix_fmt', 'yuv420p',
+            '-crf', '18',  # High quality
+            output_path
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            print(f"Created video: {os.path.basename(output_path)}")
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating {output_path}: {e.stderr}")
+        except FileNotFoundError:
+            print("ffmpeg not found. Please install ffmpeg to create videos.")
+            print("Individual frames are saved in the frames/ directory.")
+            return
+
+    print(f"Videos saved to {output_dir}/")
+
+
+def create_activity_videos(ground_truth, predictions, segmentation, positions, max_neurons, output_dir, fps=10):
+    """Create activity videos using frame-based approach with ffmpeg."""
+    frames_dir = save_activity_frames(ground_truth, predictions, segmentation, positions, max_neurons, output_dir)
+    create_video_from_frames(frames_dir, output_dir, fps)
 
 
 def save_results_summary(metrics, cfg, output_dir, checkpoint_path):
@@ -466,8 +507,8 @@ def main():
     
     if segmentation is not None and positions is not None:
         max_neurons = cfg.get('max_neurons', traces.shape[1])
-        create_activity_video(ground_truth, predictions, segmentation, positions, max_neurons, 
-                            cfg['output_dir'], cfg['video_fps'])
+        create_activity_videos(ground_truth, predictions, segmentation, positions, max_neurons,
+                             cfg['output_dir'], cfg['video_fps'])
     else:
         print("Skipping video generation (segmentation or positions not available)")
     

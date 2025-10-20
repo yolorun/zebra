@@ -5,6 +5,7 @@ __pycache__/
 *$py.class
 tmp/
 out/
+inference_results/
 
 # C extensions
 *.so

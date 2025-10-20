@@ -330,7 +330,8 @@ class MassiveRNNModule(pl.LightningModule):
             min_strength=cfg.get('min_connection_strength', 0.0),
             bias=cfg.get('use_bias', True),
             num_neurons=self.num_neurons,  # Use the actual number of neurons from data
-            assume_zero_indexed=assume_zero_indexed
+            assume_zero_indexed=assume_zero_indexed,
+            shared_stim_proj=cfg.get('shared_stim_proj', False)
         )
         
         # Loss functions
@@ -467,7 +468,7 @@ class MassiveRNNModule(pl.LightningModule):
         current_calcium = initial_calcium
         current_hidden = initial_hidden
         
-        for t in range(num_steps):
+        for t in tqdm(range(num_steps), 'Inference'):
             stimulus_t = stimulus_seq[:, t, :] if stimulus_seq is not None else None
             calcium_pred, hidden_new = self.model(current_calcium, current_hidden, stimulus_t)
             predictions[:, t, :] = calcium_pred
@@ -572,35 +573,36 @@ def main():
         # Data paths
         'traces_path': 'file:///home/v/proj/zebra/data/traces',
         'stimulus_path': '/home/v/proj/zebra/data/stimuli_raw/stimuli_and_ephys.10chFlt',
-        'connectivity_path': 'connectivity_graph_pos.pkl',  # or 'connectivity_graph_global_threshold.pkl' for cross-correlation
+        'connectivity_path': 'connectivity_graph_global_threshold.pkl',  # or connectivity_graph_pos.pkl
         'assume_zero_indexed': False,  # Set to True if neuron IDs in connectivity graph are 0-indexed
         
         # Data parameters
         'condition_name': None,  # None for all data, or 'turning', 'swimming', etc.
         'max_neurons': None,  # Start with small subset for testing, None for all neurons
-        'sequence_length': 32,  # Length of input sequences
+        'sequence_length': 16,  # TODO Length of input sequences
         'train_val_split': 0.9,  # Train/validation split ratio
         'normalize_traces': False,  # Whether to z-score normalize traces
         'noise_std': 0.08,  # Standard deviation of Gaussian noise to add to traces
         'nonzero_calc': True,  # Clip calcium traces to non-negative values
         
         # Model parameters
-        'hidden_dim': 4,  # Hidden dimension for GRUs
-        'stimulus_dim': 0,  # TODO Dimension of stimulus input
+        'hidden_dim': 8,  # Hidden dimension for GRUs
+        'stimulus_dim': 10,  # TODO Dimension of stimulus input
         'include_self_connections': True,  # Add self-connections to graph
-        'min_connection_strength': 0.08,  # TODO Minimum strength to include connection
+        'min_connection_strength': 0.52,  # Minimum strength to include connection
         'use_bias': True,  # Use bias in GRU gates
+        'shared_stim_proj': True,  # Use single shared stimulus projection (saves 67% params: 5.6M vs 16.8M)
         
         # Training parameters
-        'batch_size': 2,  # Batch size (reduce if OOM)
-        'accumulate_grad_batches': 16,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
+        'batch_size': 2,  # Batch size
+        'accumulate_grad_batches': 2,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
         'learning_rate': 1e-3,  # Initial learning rate
         'weight_decay': 1e-5,  # L2 regularization
-        'max_epochs': 3,  # Maximum training epochs
+        'max_epochs': 10,  # Maximum training epochs
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
-        'use_gradient_checkpointing': True,  # Trade compute for memory (40-50% VRAM savings)
+        'use_gradient_checkpointing': False,  # Trade compute for memory (40-50% VRAM savings)
         'bptt_chunk_size': 0,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
         'scheduler_type': 'cosine',  # 'cosine' or 'reduce_on_plateau'
         'warmup_steps': 100,  # Number of warmup steps (0 for no warmup)
@@ -613,8 +615,8 @@ def main():
         'strategy': 'auto',  # Training strategy: 'auto', 'ddp', 'deepspeed_stage_2', 'deepspeed_stage_3'
         'precision': '32',  # '16-mixed',  # Mixed precision training
         'gradient_clip_val': 1.0,  # Gradient clipping
-        'num_workers': 8,  # DataLoader workers
-        'prefetch_factor': 4,  # DataLoader prefetch factor
+        'num_workers': 4,  # DataLoader workers
+        'prefetch_factor': 2,  # DataLoader prefetch factor
         'pin_memory': True,  # Pin memory for faster GPU transfer (uses more memory)
         
         # Logging and checkpointing
@@ -660,7 +662,7 @@ def main():
     
     # Create unique checkpoint directory with timestamp
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    checkpoint_dir = f"massive-rnn_{timestamp}"
+    checkpoint_dir = f"checkpoints/massive-rnn_{timestamp}"
     os.makedirs(checkpoint_dir, exist_ok=True)
     print(f"Checkpoints will be saved to: {checkpoint_dir}")
     
