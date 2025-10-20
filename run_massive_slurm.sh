@@ -84,9 +84,9 @@ echo "-------------------"
 echo "Starting training at $(date)..."
 
 # Default command - modify parameters as needed via --params
-python massive_rnn_train.py --params sequence_length=32 batch_size=16 accumulate_grad_batches=2 \
+python massive_rnn_train.py --params sequence_length=32 batch_size=32 accumulate_grad_batches=1 \
        connectivity_path="connectivity_graph_global_threshold.pkl" min_connection_strength=0.52 \
-       hidden_dim=8 \
+       hidden_dim=10 \
        strategy=auto precision="32" use_gradient_checkpointing=False
 
 if [ $? -eq 0 ]; then
