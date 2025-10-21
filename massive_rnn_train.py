@@ -257,6 +257,17 @@ class CalciumDataModule(pl.LightningDataModule):
             stimulus_tensor, size=n_trace_samples, mode='linear', align_corners=False
         )
         stimulus = resampled_stimulus.squeeze(0).permute(1, 0).numpy()
+
+        # Min-max normalize each stimulus channel to [0, 1]
+        stim_min = stimulus.min(axis=0, keepdims=True)  # (1, 10) - min per channel
+        stim_max = stimulus.max(axis=0, keepdims=True)  # (1, 10) - max per channel
+        stim_range = stim_max - stim_min
+
+        # Handle constant channels (where min == max)
+        stim_range = np.where(stim_range == 0, 1.0, stim_range)
+
+        # Normalize to [0, 1]
+        stimulus = (stimulus - stim_min) / stim_range
         
         print(f"Resampled stimulus to shape: {stimulus.shape}")
         
@@ -683,7 +694,7 @@ def main():
         verbose=True
     )
     
-    lr_monitor = LearningRateMonitor(logging_interval='epoch')
+    lr_monitor = LearningRateMonitor(logging_interval='step')
     
     # Initialize trainer
     trainer = pl.Trainer(
