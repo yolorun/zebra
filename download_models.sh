@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DALL=false
-REMOTE="v@100.79.4.66:/home/v/proj/zebra"
+REMOTE="v@100.116.63.100:/home/v/proj/zebra"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
