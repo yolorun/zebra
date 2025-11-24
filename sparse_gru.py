@@ -166,8 +166,8 @@ class SparseGRUBrain(nn.Module):
                 self.stimulus_projection_h = nn.Linear(stimulus_dim, N * H)
         
         # Output projection: hidden -> predicted calcium (scalar per neuron)
-        # self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)
-        self.output_projection = nn.Parameter(torch.randn(H))  # shared
+        self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)
+        # self.output_projection = nn.Parameter(torch.randn(H))  # shared
 
         # Pre-build sparse tensor shapes for efficiency
         self.sparse_shape = (N * H, N)

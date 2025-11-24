@@ -50,6 +50,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.checkpoint import checkpoint
 import pytorch_lightning as pl
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from matplotlib.gridspec import GridSpec
+
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, LearningRateMonitor
 import numpy as np
@@ -318,6 +323,72 @@ class CalciumDataModule(pl.LightningDataModule):
         )
 
 
+def plot_random_neurons_comparison(ground_truth, predictions, num_neurons):
+    """Plot ground truth vs predictions for random neurons."""
+    predictions_np = predictions.cpu().numpy().squeeze(0)
+    ground_truth_np = ground_truth.cpu().numpy().squeeze(0)
+    n_total_neurons = ground_truth_np.shape[1]
+    
+    neuron_indices = np.random.choice(n_total_neurons, size=min(num_neurons, n_total_neurons), replace=False)
+    
+    fig, axes = plt.subplots(2, 4, figsize=(16, 8))
+    axes = axes.flatten()
+    
+    for i, neuron_idx in enumerate(neuron_indices):
+        if i >= len(axes):
+            break
+        
+        ax = axes[i]
+        gt = ground_truth_np[:, neuron_idx]
+        pred = predictions_np[:, neuron_idx]
+        
+        ax.plot(gt, label='Ground Truth', linewidth=1.5, alpha=0.8)
+        ax.plot(pred, label='Predicted', linewidth=1.5, alpha=0.8)
+        
+        mse = np.mean((gt - pred) ** 2)
+        mae = np.mean(np.abs(gt - pred))
+        
+        ax.set_title(f'Neuron {neuron_idx}\nMSE: {mse:.4f}, MAE: {mae:.4f}')
+        ax.set_xlabel('Timestep')
+        ax.set_ylabel('Activity')
+        ax.legend(loc='best', fontsize=8)
+        ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def plot_per_neuron_error_distribution(ground_truth, predictions):
+    """Plot distribution of per-neuron errors."""
+    predictions_np = predictions.cpu().numpy().squeeze(0)
+    ground_truth_np = ground_truth.cpu().numpy().squeeze(0)
+    
+    per_neuron_mse = np.mean((ground_truth_np - predictions_np) ** 2, axis=0)
+    per_neuron_mae = np.mean(np.abs(ground_truth_np - predictions_np), axis=0)
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    
+    ax1.hist(per_neuron_mse, bins=50, edgecolor='black', alpha=0.7)
+    ax1.axvline(np.mean(per_neuron_mse), color='red', linestyle='--', label=f'Mean: {np.mean(per_neuron_mse):.4f}')
+    ax1.axvline(np.median(per_neuron_mse), color='green', linestyle='--', label=f'Median: {np.median(per_neuron_mse):.4f}')
+    ax1.set_xlabel('MSE')
+    ax1.set_ylabel('Number of Neurons')
+    ax1.set_title('Per-Neuron MSE Distribution')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    
+    ax2.hist(per_neuron_mae, bins=50, edgecolor='black', alpha=0.7, color='orange')
+    ax2.axvline(np.mean(per_neuron_mae), color='red', linestyle='--', label=f'Mean: {np.mean(per_neuron_mae):.4f}')
+    ax2.axvline(np.median(per_neuron_mae), color='green', linestyle='--', label=f'Median: {np.median(per_neuron_mae):.4f}')
+    ax2.set_xlabel('MAE')
+    ax2.set_ylabel('Number of Neurons')
+    ax2.set_title('Per-Neuron MAE Distribution')
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+
 class MassiveRNNModule(pl.LightningModule):
     """PyTorch Lightning module for training the sparse GRU network."""
     
@@ -372,6 +443,33 @@ class MassiveRNNModule(pl.LightningModule):
         outputs = torch.stack(outputs, dim=1)  # (batch, seq_len, n_neurons)
         return outputs
     
+    def correlation_loss(self, pred, target, epsilon=1e-8):
+        """
+        Compute Pearson correlation loss (1 - correlation).
+        args:
+            pred: (B, T, N)
+            target: (B, T, N)
+        """
+        # Center variables over time dimension (dim=1)
+        pred_mean = pred.mean(dim=1, keepdim=True)
+        target_mean = target.mean(dim=1, keepdim=True)
+        pred_centered = pred - pred_mean
+        target_centered = target - target_mean
+
+        # Covariance
+        covariance = (pred_centered * target_centered).sum(dim=1)
+
+        # Variances
+        pred_var = (pred_centered ** 2).sum(dim=1)
+        target_var = (target_centered ** 2).sum(dim=1)
+
+        # Correlation coefficient (B, N)
+        # Add epsilon to denominator to prevent division by zero
+        correlation = covariance / torch.sqrt(pred_var * target_var + epsilon)
+        
+        # Loss is 1 - mean correlation (minimize this)
+        return 1 - correlation.mean()
+
     def training_step(self, batch, batch_idx):
         calcium_seq_noisy, stimulus_seq, calcium_seq_clean = batch
         batch_size, seq_len, n_neurons = calcium_seq_noisy.shape
@@ -384,6 +482,9 @@ class MassiveRNNModule(pl.LightningModule):
         
         # Teacher forcing training with optional BPTT
         losses = []
+        preds = []
+        targets = []
+        
         for t in range(seq_len - 1):
             # Truncated BPTT: detach hidden state periodically
             if bptt_chunk_size > 0 and t > 0 and t % bptt_chunk_size == 0:
@@ -402,17 +503,31 @@ class MassiveRNNModule(pl.LightningModule):
             else:
                 calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
             
-            # Compute loss and store
+            # Compute MSE loss and store
             loss = self.mse_loss(calcium_pred, target_t)
             losses.append(loss)
+            
+            # Store for correlation loss
+            preds.append(calcium_pred)
+            targets.append(target_t)
         
-        # Average loss over sequence
-        avg_loss = torch.stack(losses).mean()
+        # Average MSE loss over sequence
+        mse_loss = torch.stack(losses).mean()
+        
+        # Compute correlation loss over the full sequence
+        preds_stacked = torch.stack(preds, dim=1)      # (B, T, N)
+        targets_stacked = torch.stack(targets, dim=1)  # (B, T, N)
+        corr_loss = self.correlation_loss(preds_stacked, targets_stacked)
+        
+        # Combined loss
+        total_loss = mse_loss + 0.1 * corr_loss
         
         # Logging
-        self.log('train_loss', avg_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_mse', mse_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_corr', corr_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log('train_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         
-        return avg_loss
+        return total_loss
     
     def validation_step(self, batch, batch_idx):
         calcium_seq_noisy, stimulus_seq, calcium_seq_clean = batch
@@ -424,6 +539,9 @@ class MassiveRNNModule(pl.LightningModule):
         # Teacher forcing evaluation (use clean inputs for validation)
         tf_losses = []
         mae_losses = []
+        preds = []
+        targets = []
+        
         for t in range(seq_len - 1):
             calcium_t = calcium_seq_clean[:, t, :]  # Clean input for validation
             stimulus_t = stimulus_seq[:, t, :]
@@ -432,9 +550,17 @@ class MassiveRNNModule(pl.LightningModule):
             calcium_pred, hidden = self.model(calcium_t, hidden, stimulus_t)
             tf_losses.append(self.mse_loss(calcium_pred, target_t))
             mae_losses.append(self.mae_loss(calcium_pred, target_t))
+            
+            preds.append(calcium_pred)
+            targets.append(target_t)
         
         avg_tf_loss = torch.stack(tf_losses).mean()
         avg_mae = torch.stack(mae_losses).mean()
+        
+        # Correlation loss for validation
+        preds_stacked = torch.stack(preds, dim=1)
+        targets_stacked = torch.stack(targets, dim=1)
+        avg_corr_loss = self.correlation_loss(preds_stacked, targets_stacked)
         
         # Autoregressive evaluation (predict multiple steps ahead)
         if self.autoregressive_steps > 1 and seq_len > self.autoregressive_steps:
@@ -456,8 +582,80 @@ class MassiveRNNModule(pl.LightningModule):
         # Logging
         self.log('val_loss', avg_tf_loss, on_epoch=True, prog_bar=True, logger=True)
         self.log('val_mae', avg_mae, on_epoch=True, prog_bar=True, logger=True)
+        self.log('val_corr', avg_corr_loss, on_epoch=True, prog_bar=True, logger=True)
         
         return avg_tf_loss
+
+    def on_validation_epoch_end(self):
+        """Generate validation plots at the end of each validation epoch."""
+        # Only run on rank 0 to avoid redundant plotting and logging
+        if self.global_rank != 0:
+            return
+
+        # Skip if no logger or not WandB
+        if self.logger is None or not isinstance(self.logger, WandbLogger):
+            return
+
+        # Get configuration
+        gen_steps = self.hparams.get('validation_gen_steps', 200)
+        num_plot_neurons = self.hparams.get('num_plot_neurons', 8)
+        
+        # Get validation dataset from trainer
+        if not hasattr(self.trainer, 'datamodule') or self.trainer.datamodule is None:
+            return
+            
+        val_dataset = self.trainer.datamodule.val_dataset
+        
+        # We need direct access to traces and stimulus for long sequence generation
+        traces = val_dataset.traces
+        stimulus = val_dataset.stimulus
+        sequence_length = self.hparams.get('sequence_length', 32)
+        
+        # Ensure we have enough data
+        total_timesteps = traces.shape[0]
+        if total_timesteps <= sequence_length + gen_steps:
+            return
+
+        # Select random start point
+        start_idx = np.random.randint(sequence_length, total_timesteps - gen_steps)
+        
+        # Prepare inputs
+        # Warmup: use ground truth to initialize hidden state
+        # Move to device and add batch dimension
+        warmup_traces = traces[start_idx - sequence_length:start_idx, :].unsqueeze(0).to(self.device)
+        warmup_stimulus = stimulus[start_idx - sequence_length:start_idx, :].unsqueeze(0).to(self.device)
+        
+        # Inference stimulus and ground truth
+        inference_stimulus = stimulus[start_idx:start_idx + gen_steps, :].unsqueeze(0).to(self.device)
+        ground_truth = traces[start_idx:start_idx + gen_steps, :].unsqueeze(0).to(self.device)
+        
+        # Run inference
+        with torch.no_grad():
+            # Initialize hidden state
+            hidden = self.model.init_hidden(1, device=self.device)
+            
+            # Warmup
+            for t in range(sequence_length):
+                _, hidden = self.model(warmup_traces[:, t, :], hidden, warmup_stimulus[:, t, :])
+            
+            # Generation
+            initial_calcium = warmup_traces[:, -1, :]
+            predictions = self.infer(initial_calcium, hidden, inference_stimulus, gen_steps)
+            
+            # Create plots
+            fig_neurons = plot_random_neurons_comparison(ground_truth, predictions, num_plot_neurons)
+            fig_dist = plot_per_neuron_error_distribution(ground_truth, predictions)
+            
+            # Log to WandB
+            self.logger.experiment.log({
+                "val/random_neurons": wandb.Image(fig_neurons),
+                "val/error_dist": wandb.Image(fig_dist),
+                "global_step": self.global_step
+            })
+            
+            # Clean up
+            plt.close(fig_neurons)
+            plt.close(fig_dist)
     
     def infer(self, initial_calcium, initial_hidden, stimulus_seq, num_steps):
         """
@@ -612,6 +810,8 @@ def main():
         'max_epochs': 10,  # Maximum training epochs
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation
+        'validation_gen_steps': 200,  # Steps for validation generation plots
+        'num_plot_neurons': 8,  # Number of random neurons to plot
         'use_8bit_optimizer': True,  # Use 8-bit AdamW (saves ~60% optimizer memory, requires bitsandbytes)
         'use_gradient_checkpointing': False,  # Trade compute for memory (40-50% VRAM savings)
         'bptt_chunk_size': 0,  # Truncated BPTT: detach hidden state every N steps (0=disabled, 8-16 recommended)
