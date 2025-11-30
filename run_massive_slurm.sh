@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=massive_rnn
 #SBATCH --output=./logs/%x_%j.out
-#SBATCH --time=168:00:00
+#SBATCH --time=72:00:00
 #SBATCH --partition=ml_gpus
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -84,7 +84,7 @@ echo "-------------------"
 echo "Starting training at $(date)..."
 
 # Default command - modify parameters as needed via --params
-python massive_rnn_train.py --params sequence_length=32 batch_size=16 accumulate_grad_batches=4 max_epochs=30 \
+python massive_rnn_train.py --params sequence_length=32 batch_size=16 accumulate_grad_batches=4 max_epochs=10 \
        connectivity_path="connectivity_graph_global_threshold.pkl" min_connection_strength=0.52 \
        hidden_dim=16 shared_stim_proj=False \
        strategy=auto precision="32" use_gradient_checkpointing=False
