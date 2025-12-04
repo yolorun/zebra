@@ -413,7 +413,9 @@ class MassiveRNNModule(pl.LightningModule):
             bias=cfg.get('use_bias', True),
             num_neurons=self.num_neurons,  # Use the actual number of neurons from data
             assume_zero_indexed=assume_zero_indexed,
-            shared_stim_proj=cfg.get('shared_stim_proj', False)
+            shared_stim_proj=cfg.get('shared_stim_proj', False),
+            residual_prediction=cfg.get('residual_prediction', False),
+            output_mlp=cfg.get('output_mlp', False)
         )
         
         # Loss functions
@@ -520,7 +522,8 @@ class MassiveRNNModule(pl.LightningModule):
         corr_loss = self.correlation_loss(preds_stacked, targets_stacked)
         
         # Combined loss
-        total_loss = mse_loss + 0.1 * corr_loss
+        corr_weight = self.hparams.get('corr_loss_weight', 1.0)
+        total_loss = mse_loss + corr_weight * corr_loss
         
         # Logging
         self.log('train_mse', mse_loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
@@ -795,18 +798,21 @@ def main():
         'nonzero_calc': True,  # Clip calcium traces to non-negative values
         
         # Model parameters
-        'hidden_dim': 8,  # Hidden dimension for GRUs
+        'hidden_dim': 32,  # Hidden dimension for GRUs
         'stimulus_dim': 10,  # TODO Dimension of stimulus input
         'include_self_connections': True,  # Add self-connections to graph
         'min_connection_strength': 0.52,  # Minimum strength to include connection
         'use_bias': True,  # Use bias in GRU gates
         'shared_stim_proj': True,  # Use single shared stimulus projection (saves 67% params: 5.6M vs 16.8M)
+        'residual_prediction': False,  # If True, predict delta and add to input calcium
+        'output_mlp': False,  # If True, use per-neuron MLP instead of linear output projection
         
         # Training parameters
         'batch_size': 2,  # Batch size
         'accumulate_grad_batches': 2,  # Gradient accumulation steps (1=no accumulation, 2/4/8 for memory savings)
         'learning_rate': 1e-3,  # Initial learning rate
         'weight_decay': 1e-5,  # L2 regularization
+        'corr_loss_weight': 1.0,  # Weight for correlation loss (higher = more emphasis on dynamics)
         'max_epochs': 10,  # Maximum training epochs
         'teacher_forcing_ratio': 1.0,  # Teacher forcing ratio (1.0 = always use ground truth)
         'autoregressive_val_steps': 1,  # Steps for autoregressive validation

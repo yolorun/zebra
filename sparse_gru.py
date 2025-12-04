@@ -112,7 +112,7 @@ class SparseGRUBrain(nn.Module):
     Each neuron has its own GRU with potentially different input connections.
     """
 
-    def __init__(self, num_neurons, hidden_dim, edge_list, stimulus_dim=0, bias=True, shared_stim_proj=False):
+    def __init__(self, num_neurons, hidden_dim, edge_list, stimulus_dim=0, bias=True, shared_stim_proj=False, residual_prediction=False, output_mlp=False):
         """
         Args:
             num_neurons: Number of neurons (70k in your case)
@@ -122,6 +122,8 @@ class SparseGRUBrain(nn.Module):
             stimulus_dim: Dimension of stimulus input (0 if no stimulus)
             bias: Whether to use bias terms in GRU gates
             shared_stim_proj: If True, use single shared projection for stimulus (saves 67% params)
+            residual_prediction: If True, predict delta and add to input calcium
+            output_mlp: If True, use per-neuron MLP instead of linear output projection
         """
         super().__init__()
         N, H = num_neurons, hidden_dim
@@ -129,6 +131,8 @@ class SparseGRUBrain(nn.Module):
         self.hidden_dim = H
         self.stimulus_dim = stimulus_dim
         self.shared_stim_proj = shared_stim_proj
+        self.residual_prediction = residual_prediction
+        self.output_mlp = output_mlp
 
         # Build sparse indices from edge list
         self.register_buffer('W_indices', self._build_sparse_indices(edge_list, N, H))
@@ -166,8 +170,13 @@ class SparseGRUBrain(nn.Module):
                 self.stimulus_projection_h = nn.Linear(stimulus_dim, N * H)
         
         # Output projection: hidden -> predicted calcium (scalar per neuron)
-        self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)  # TODO maybe we need more complex output proj, like a residual mlp
-        # self.output_projection = nn.Parameter(torch.randn(H))  # shared
+        if output_mlp:
+            # Per-neuron MLP: H -> H*2 -> 1
+            self.output_w1 = nn.Parameter(torch.randn(N, H, H * 2) * 0.01)
+            self.output_b1 = nn.Parameter(torch.zeros(N, H * 2))
+            self.output_w2 = nn.Parameter(torch.randn(N, H * 2) * 0.01)
+        else:
+            self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)
 
         # Pre-build sparse tensor shapes for efficiency
         self.sparse_shape = (N * H, N)
@@ -270,8 +279,17 @@ class SparseGRUBrain(nn.Module):
         hidden_new = (1 - z) * hidden + z * h_tilde
 
         # Output projection to predict next calcium value
-        # calcium_t1 = (hidden_new * self.output_projection.unsqueeze(0)).sum(dim=-1)
-        calcium_t1 = (hidden_new * self.output_projection).sum(dim=-1)
+        if self.output_mlp:
+            # Per-neuron MLP: (B, N, H) -> (B, N, H*2) -> (B, N)
+            x = torch.einsum('bnh,nhk->bnk', hidden_new, self.output_w1) + self.output_b1
+            x = torch.gelu(x)
+            delta = (x * self.output_w2).sum(dim=-1)
+        else:
+            delta = (hidden_new * self.output_projection).sum(dim=-1)
+        if self.residual_prediction:
+            calcium_t1 = calcium_t + delta
+        else:
+            calcium_t1 = delta
         calcium_t1 = torch.relu(calcium_t1)  # Ensure non-negative calcium values
 
         return calcium_t1, hidden_new
@@ -281,13 +299,14 @@ class SparseGRUBrain(nn.Module):
         Initialize hidden states for all neurons.
         """
         if device is None:
-            device = self.output_projection.device
+            device = self.U_z.device
         return torch.zeros(batch_size, self.num_neurons, self.hidden_dim, device=device)
     
     @classmethod
     def from_connectivity_graph(cls, connectivity_graph, hidden_dim, stimulus_dim=0, 
                                 include_self_connections=True, min_strength=0.0, bias=True,
-                                num_neurons=None, assume_zero_indexed=False, shared_stim_proj=False):
+                                num_neurons=None, assume_zero_indexed=False, shared_stim_proj=False,
+                                residual_prediction=False, output_mlp=False):
         """
         Create SparseGRUBrain from connectivity graph dict.
         
@@ -359,7 +378,7 @@ class SparseGRUBrain(nn.Module):
         edge_list = sorted(edge_list)
         
         print(f"Creating SparseGRUBrain with {num_neurons} neurons and {len(edge_list)} connections")
-        return cls(num_neurons, hidden_dim, edge_list, stimulus_dim=stimulus_dim, bias=bias, shared_stim_proj=shared_stim_proj)
+        return cls(num_neurons, hidden_dim, edge_list, stimulus_dim=stimulus_dim, bias=bias, shared_stim_proj=shared_stim_proj, residual_prediction=residual_prediction, output_mlp=output_mlp)
 
 
 # Example usage
