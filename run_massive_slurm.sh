@@ -89,7 +89,7 @@ echo "Starting training at $(date)..."
 python massive_rnn_train.py --params sequence_length=32 batch_size=8 accumulate_grad_batches=8 max_epochs=10 \
        connectivity_path="connectivity_graph_pos.pkl" min_connection_strength=0.0 \
        hidden_dim=16 shared_stim_proj=False noise_std=0.04 gradient_clip_val=1.0 learning_rate=8e-4 \
-       strategy=auto precision="32" use_gradient_checkpointing=False
+       strategy=auto precision="32" use_gradient_checkpointing=False  # TODO try residual_prediction=True
 
 if [ $? -eq 0 ]; then
     echo "Training completed successfully at $(date)"

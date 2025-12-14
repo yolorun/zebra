@@ -1,5 +1,8 @@
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.sparse
 
 
@@ -176,7 +179,11 @@ class SparseGRUBrain(nn.Module):
             self.output_b1 = nn.Parameter(torch.zeros(N, H * 2))
             self.output_w2 = nn.Parameter(torch.randn(N, H * 2) * 0.01)
         else:
-            self.output_projection = nn.Parameter(torch.randn(N, H) * 0.01)
+            self.output_projection = nn.Parameter(torch.randn(N, H) / math.sqrt(H))
+            self.output_bias = nn.Parameter(torch.full((N,), 0.1))
+
+        # Learnable initial hidden state
+        self.h0 = nn.Parameter(torch.randn(1, N, H) * 0.1)
 
         # Pre-build sparse tensor shapes for efficiency
         self.sparse_shape = (N * H, N)
@@ -285,22 +292,23 @@ class SparseGRUBrain(nn.Module):
             x = torch.gelu(x)
             delta = (x * self.output_w2).sum(dim=-1)
         else:
-            delta = (hidden_new * self.output_projection).sum(dim=-1)
+            delta = (hidden_new * self.output_projection).sum(dim=-1) + self.output_bias
+        
         if self.residual_prediction:
             calcium_t1 = calcium_t + delta
         else:
             calcium_t1 = delta
-        calcium_t1 = torch.relu(calcium_t1)  # Ensure non-negative calcium values
+        calcium_t1 = F.softplus(calcium_t1, beta=5)  # Smooth non-negative, allows gradient flow near zero
 
         return calcium_t1, hidden_new
 
     def init_hidden(self, batch_size, device=None):
         """
-        Initialize hidden states for all neurons.
+        Initialize hidden states for all neurons using learnable initial state.
         """
         if device is None:
             device = self.U_z.device
-        return torch.zeros(batch_size, self.num_neurons, self.hidden_dim, device=device)
+        return self.h0.expand(batch_size, -1, -1).to(device)
     
     @classmethod
     def from_connectivity_graph(cls, connectivity_graph, hidden_dim, stimulus_dim=0, 
